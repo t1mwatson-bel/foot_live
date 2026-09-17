@@ -3,7 +3,7 @@ import sys
 import requests
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # =====================================================================
@@ -54,13 +54,16 @@ UPDATE_INTERVAL = 60
 ANTISPAM_SEC   = 600
 
 # Проверка результата
-CHECK_FIRST_AFTER  = 1800    # первая проверка через 30 мин
-CHECK_REPEAT_AFTER = 1800    # повтор каждые 30 мин
-CHECK_MAX_ATTEMPTS = 4       # максимум 4 проверки
+CHECK_FIRST_AFTER  = 1800
+CHECK_REPEAT_AFTER = 1800
+CHECK_MAX_ATTEMPTS = 4
 
-# Ночной режим (МСК)
-SLEEP_HOUR_START = 1    # 01:00 — засыпаем
-SLEEP_HOUR_END   = 12   # 12:00 — просыпаемся
+# Ночной режим (МСК): спит с 01:00 до 12:00
+SLEEP_HOUR_START = 1
+SLEEP_HOUR_END   = 12
+
+# Расписание
+SCHEDULE_REFRESH_SEC = 3600    # обновление раз в час
 
 RUSCORE_URL = "https://api-statistics.ruscore.ru/v1/events"
 RUSCORE_PARAMS = {
@@ -84,14 +87,18 @@ print("✅ Настройки загружены", flush=True)
 # =====================================================================
 # СОСТОЯНИЕ
 # =====================================================================
-sent_signals = {}       # {game_id: {"xg_diff": float, "ts": int}}
-pending_checks = {}     # {game_id: {...данные сигнала...}}
+sent_signals = {}
+pending_checks = {}
+
+# Расписание
+schedule_windows = []       # список (start, end) — окна матчей
+schedule_updated_at = None  # когда обновляли
 
 # =====================================================================
 # АКТИВНОЕ ВРЕМЯ
 # =====================================================================
 def is_active_time():
-    """Активное время: 12:00 – 00:59 МСК. Ночь (01:00–12:00) — спит."""
+    """Активное время: 12:00 – 00:59 МСК."""
     hour = datetime.now(MOSCOW_TZ).hour
     if SLEEP_HOUR_START <= hour < SLEEP_HOUR_END:
         return False
@@ -187,10 +194,7 @@ def analyze_game(game):
     if not signal_type:
         return None
 
-    if xg1 > xg2:
-        dominant = o1
-    else:
-        dominant = o2
+    dominant = o1 if xg1 > xg2 else o2
 
     return {
         "game_id":   game_id,
@@ -307,7 +311,6 @@ def parse_score_from_ruscore(ev):
     return None, None
 
 def check_pending_results():
-    """Проверяет все ожидающие сигналы через ruscore. Работает даже ночью."""
     global pending_checks
     if not pending_checks:
         return
@@ -382,7 +385,6 @@ def check_pending_results():
                 del pending_checks[gid]
                 continue
 
-            # Ещё играют — повтор
             info["attempts"] = info.get("attempts", 0) + 1
             info["check_after"] = now + CHECK_REPEAT_AFTER
 
@@ -395,6 +397,79 @@ def check_pending_results():
                 edit_telegram(info["message_id"],
                               format_with_result(info["base_text"], line))
                 del pending_checks[gid]
+
+# =====================================================================
+# РАСПИСАНИЕ
+# =====================================================================
+def get_today_schedule():
+    """Возвращает список матчей на сегодня с временем начала."""
+    today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+    events = fetch_ruscore_events(today)
+
+    schedule = []
+    for ev in events:
+        time_str = ev.get("time")
+        if not time_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(time_str)
+            # Приводим к МСК
+            dt = dt.astimezone(MOSCOW_TZ)
+            schedule.append({
+                "time": dt,
+                "match": f"{(ev.get('home') or {}).get('name')} — "
+                         f"{(ev.get('away') or {}).get('name')}",
+            })
+        except (ValueError, TypeError):
+            continue
+    return schedule
+
+def get_monitoring_windows(schedule):
+    """Объединяет времена матчей в окна (start, end)."""
+    if not schedule:
+        return []
+
+    times = sorted([s["time"] for s in schedule])
+    windows = [(t, t + timedelta(hours=2)) for t in times]
+
+    merged = [windows[0]]
+    for start, end in windows[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+def refresh_schedule_if_needed():
+    """Обновляет расписание раз в час."""
+    global schedule_windows, schedule_updated_at
+    now = datetime.now(MOSCOW_TZ)
+
+    if schedule_updated_at and (now - schedule_updated_at).total_seconds() < SCHEDULE_REFRESH_SEC:
+        return
+
+    print(f"📅 Обновляем расписание...", flush=True)
+    schedule = get_today_schedule()
+    schedule_windows = get_monitoring_windows(schedule)
+    schedule_updated_at = now
+
+    if schedule_windows:
+        print(f"📅 Найдено {len(schedule_windows)} окон:", flush=True)
+        for start, end in schedule_windows:
+            print(f"   {start.strftime('%H:%M')} – {end.strftime('%H:%M')} МСК", flush=True)
+    else:
+        print("📅 Матчей в топ-лигах сегодня нет", flush=True)
+
+def is_match_time():
+    """Проверяет, есть ли матч прямо сейчас."""
+    if not schedule_windows:
+        return False
+    now = datetime.now(MOSCOW_TZ)
+    for start, end in schedule_windows:
+        if start <= now <= end:
+            return True
+    return False
 
 # =====================================================================
 # ОСНОВНОЙ ЦИКЛ
@@ -480,25 +555,33 @@ def main():
           f"повтор каждые {CHECK_REPEAT_AFTER//60} мин, "
           f"макс {CHECK_MAX_ATTEMPTS} попыток", flush=True)
     print(f"😴 Ночной режим: с {SLEEP_HOUR_START:02d}:00 до {SLEEP_HOUR_END:02d}:00 МСК", flush=True)
+    print(f"📅 Расписание: обновление раз в час", flush=True)
     print("=" * 60, flush=True)
 
     while True:
         try:
-            if is_active_time():
-                # День: мониторинг + проверки
+            now = datetime.now(MOSCOW_TZ)
+            now_str = now.strftime('%H:%M')
+
+            # Ночью — полный сон, НИЧЕГО не делаем
+            if not is_active_time():
+                print(f"😴 Ночь ({now_str} МСК) — спим до 12:00", flush=True)
+                time.sleep(600)
+                continue
+
+            # Днём — обновляем расписание раз в час
+            refresh_schedule_if_needed()
+
+            # Матчи идут?
+            if is_match_time():
                 monitor()
                 check_pending_results()
                 time.sleep(UPDATE_INTERVAL)
             else:
-                # Ночь: только проверки, без мониторинга
-                now_str = datetime.now(MOSCOW_TZ).strftime('%H:%M')
-                if pending_checks:
-                    print(f"😴 Ночь ({now_str} МСК) — только проверки "
-                          f"({len(pending_checks)} в очереди)", flush=True)
-                    check_pending_results()
-                else:
-                    print(f"😴 Ночь ({now_str} МСК) — спим", flush=True)
-                time.sleep(600)   # проверяем раз в 10 минут
+                # Матчей нет — только проверки сигналов
+                print(f"💤 Матчей нет ({now_str} МСК) — ждём", flush=True)
+                check_pending_results()
+                time.sleep(600)
 
         except KeyboardInterrupt:
             print("⏹️ Остановлено", flush=True)
