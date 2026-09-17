@@ -29,34 +29,29 @@ BASE_URL = "https://1xlite-36553.pro"
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # =====================================================================
-# ТОП-ЛИГИ (АКТУАЛЬНЫЕ ID)
+# ТОП-ЛИГИ
 # =====================================================================
 LEAGUES = {
-    # Европейские кубки
     "🏆 Лига Чемпионов УЕФА":            118587,
     "🏆 Лига Европы УЕФА":               118593,
     "🏆 Лига Конференций УЕФА":          2252762,
-
-    # Топ-5 лиг
     "🏴 Чемпионат Англии. АПЛ":          88637,
     "🇩🇪 Чемпионат Германии. Бундеслига": 96463,
     "🇪🇸 Чемпионат Испании. Примера":     127733,
     "🇮🇹 Чемпионат Италии. Серия А":      110163,
     "🇫🇷 Чемпионат Франции. Лига 1":      12821,
-
-    # Россия
     "🇷🇺 Чемпионат России. РПЛ":          225733,
 }
 
 # =====================================================================
-# ПОРОГИ ДЛЯ СИГНАЛА
+# ПОРОГИ
 # =====================================================================
-MIN_XG_DIFF   = 1.0    # минимальная разница xG
-MIN_SHOTS_DIFF = 3     # минимальная разница ударов в створ
-MIN_ATT_DIFF  = 20     # разница опасных атак для "давления"
-MAX_MINUTE    = 80     # не сигналить после 80-й минуты
-UPDATE_INTERVAL = 60   # цикл опроса в секундах
-ANTISPAM_SEC  = 600    # не повторять сигнал по матчу чаще, чем раз в 10 мин
+MIN_XG_DIFF    = 1.0
+MIN_SHOTS_DIFF = 3
+MIN_ATT_DIFF   = 20
+MAX_MINUTE     = 80
+UPDATE_INTERVAL = 60
+ANTISPAM_SEC   = 600
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -72,7 +67,7 @@ print("✅ Настройки загружены", flush=True)
 # =====================================================================
 # СОСТОЯНИЕ
 # =====================================================================
-sent_signals = {}   # {game_id: {"xg_diff": float, "ts": int}}
+sent_signals = {}
 
 # =====================================================================
 # API
@@ -99,6 +94,7 @@ def get_league_games(league_id):
         games = data.get("Value", [])
         if not isinstance(games, list):
             games = [games]
+        games = [g for g in games if isinstance(g, dict)]
         return games
     except Exception as e:
         print(f"❌ [{league_id}] {e}", flush=True)
@@ -114,6 +110,8 @@ def parse_stats(game):
     for key, items in tablo.items():
         if isinstance(items, list):
             for item in items:
+                if not isinstance(item, dict):
+                    continue
                 name = item.get("name")
                 if name:
                     stats[name] = item
@@ -121,11 +119,10 @@ def parse_stats(game):
 
 def analyze_game(game):
     """Возвращает dict с сигналом или None."""
-    # Игнорируем завершённые
+    if not isinstance(game, dict):
+        return None
     if game.get("isFinished"):
         return None
-
-    # Игнорируем матчи без статистики
     if not game.get("tabloStats"):
         return None
 
@@ -135,12 +132,10 @@ def analyze_game(game):
     period = game.get("currentPeriodName", "")
     game_id = game.get("id")
 
-    # Время
     timer = game.get("timer") or {}
     time_sec = timer.get("timeSec", 0)
     minute = time_sec // 60
 
-    # Статистика
     stats = parse_stats(game)
     xg = stats.get("xG", {})
     shots = stats.get("Удары в створ", {})
@@ -160,7 +155,6 @@ def analyze_game(game):
     shots_diff = abs(shots1 - shots2)
     att_diff   = abs(att1 - att2)
 
-    # Логика сигнала
     signal_type = None
     if minute <= MAX_MINUTE:
         if xg_diff >= 2.0 and shots_diff >= 3:
@@ -173,7 +167,6 @@ def analyze_game(game):
     if not signal_type:
         return None
 
-    # Кто доминирует
     if xg1 > xg2:
         dominant = o1
         weak = o2
@@ -248,7 +241,6 @@ def monitor():
             gid = result["game_id"]
             now = int(time.time())
 
-            # Антиспам: не шлём тот же сигнал чаще чем раз в ANTISPAM_SEC
             prev = sent_signals.get(gid)
             if prev and (now - prev["ts"]) < ANTISPAM_SEC:
                 if abs(prev["xg_diff"] - result["xg_diff"]) < 0.3:
@@ -259,13 +251,12 @@ def monitor():
                 sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now}
                 total_signals += 1
                 print(f"    📤 {result['match']} | {result['signal']}", flush=True)
-                time.sleep(1)  # пауза между сообщениями
+                time.sleep(1)
 
-        time.sleep(2)  # пауза между лигами
+        time.sleep(2)
 
     print(f"✅ Итого: {total_games} матчей, {total_signals} сигналов", flush=True)
 
-    # Чистим старые сигналы (старше 30 минут)
     now = int(time.time())
     sent_signals = {k: v for k, v in sent_signals.items() if now - v["ts"] < 1800}
 
