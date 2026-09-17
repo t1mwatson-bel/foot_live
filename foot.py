@@ -54,9 +54,13 @@ UPDATE_INTERVAL = 60
 ANTISPAM_SEC   = 600
 
 # Проверка результата
-CHECK_FIRST_AFTER = 1800     # первая проверка через 30 мин
-CHECK_REPEAT_AFTER = 1800    # повторная проверка через 30 мин
+CHECK_FIRST_AFTER  = 1800    # первая проверка через 30 мин
+CHECK_REPEAT_AFTER = 1800    # повтор каждые 30 мин
 CHECK_MAX_ATTEMPTS = 4       # максимум 4 проверки
+
+# Ночной режим (МСК)
+SLEEP_HOUR_START = 1    # 01:00 — засыпаем
+SLEEP_HOUR_END   = 12   # 12:00 — просыпаемся
 
 RUSCORE_URL = "https://api-statistics.ruscore.ru/v1/events"
 RUSCORE_PARAMS = {
@@ -81,7 +85,17 @@ print("✅ Настройки загружены", flush=True)
 # СОСТОЯНИЕ
 # =====================================================================
 sent_signals = {}       # {game_id: {"xg_diff": float, "ts": int}}
-pending_checks = {}     # {game_id: {...данные сигнала + message_id + текст...}}
+pending_checks = {}     # {game_id: {...данные сигнала...}}
+
+# =====================================================================
+# АКТИВНОЕ ВРЕМЯ
+# =====================================================================
+def is_active_time():
+    """Активное время: 12:00 – 00:59 МСК. Ночь (01:00–12:00) — спит."""
+    hour = datetime.now(MOSCOW_TZ).hour
+    if SLEEP_HOUR_START <= hour < SLEEP_HOUR_END:
+        return False
+    return True
 
 # =====================================================================
 # API 1WIN
@@ -233,11 +247,10 @@ def format_signal(s):
     )
 
 def format_with_result(base_text, result_line):
-    """Добавляет строку результата к базовому тексту сигнала."""
     return f"{base_text}\n\n{result_line}"
 
 # =====================================================================
-# ПРОВЕРКА ЧЕРЕЗ RUSCORE
+# RUSCORE — ПРОВЕРКА РЕЗУЛЬТАТОВ
 # =====================================================================
 def fetch_ruscore_events(date_str):
     params = dict(RUSCORE_PARAMS)
@@ -294,13 +307,13 @@ def parse_score_from_ruscore(ev):
     return None, None
 
 def check_pending_results():
+    """Проверяет все ожидающие сигналы через ruscore. Работает даже ночью."""
     global pending_checks
     if not pending_checks:
         return
 
     now = int(time.time())
 
-    # Группируем по дате
     by_date = {}
     for gid, info in pending_checks.items():
         if now < info.get("check_after", 0):
@@ -310,7 +323,6 @@ def check_pending_results():
     for date_str, gids in by_date.items():
         events = fetch_ruscore_events(date_str)
         if not events:
-            # не удалось получить список — отложим
             for gid in gids:
                 pending_checks[gid]["check_after"] = now + CHECK_REPEAT_AFTER
             continue
@@ -322,20 +334,18 @@ def check_pending_results():
 
             ev = find_match(events, info["team1"], info["team2"])
             if not ev:
-                # не нашли матч — повторим позже
                 info["attempts"] = info.get("attempts", 0) + 1
                 info["check_after"] = now + CHECK_REPEAT_AFTER
                 if info["attempts"] >= CHECK_MAX_ATTEMPTS:
-                    # сдаёмся
                     line = "❓ <b>РЕЗУЛЬТАТ НЕ НАЙДЕН</b>\n(матч не найден в ruscore)"
-                    edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                    edit_telegram(info["message_id"],
+                                  format_with_result(info["base_text"], line))
                     del pending_checks[gid]
                 continue
 
             h_score, a_score = parse_score_from_ruscore(ev)
             status = (ev.get("status") or {}).get("label", "")
 
-            # счёт ещё пустой — ждём
             if h_score is None:
                 info["check_after"] = now + CHECK_REPEAT_AFTER
                 continue
@@ -354,7 +364,8 @@ def check_pending_results():
                     f"📊 Стало: {h_score}-{a_score}\n"
                     f"⏱ Через ~{elapsed} мин"
                 )
-                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                edit_telegram(info["message_id"],
+                              format_with_result(info["base_text"], line))
                 print(f"✅ ЗАШЛО: {info['match']}", flush=True)
                 del pending_checks[gid]
                 continue
@@ -365,12 +376,13 @@ def check_pending_results():
                     f"📊 Итог: {h_score}-{a_score}\n"
                     f"⏱ Матч завершён"
                 )
-                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                edit_telegram(info["message_id"],
+                              format_with_result(info["base_text"], line))
                 print(f"❌ НЕ ЗАШЛО: {info['match']}", flush=True)
                 del pending_checks[gid]
                 continue
 
-            # ещё играют — повторная проверка
+            # Ещё играют — повтор
             info["attempts"] = info.get("attempts", 0) + 1
             info["check_after"] = now + CHECK_REPEAT_AFTER
 
@@ -380,7 +392,8 @@ def check_pending_results():
                     f"📊 Счёт: {h_score}-{a_score}\n"
                     f"(проверено {info['attempts']} раз)"
                 )
-                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                edit_telegram(info["message_id"],
+                              format_with_result(info["base_text"], line))
                 del pending_checks[gid]
 
 # =====================================================================
@@ -410,7 +423,6 @@ def monitor():
             gid = result["game_id"]
             now = int(time.time())
 
-            # антиспам
             prev = sent_signals.get(gid)
             if prev and (now - prev["ts"]) < ANTISPAM_SEC:
                 if abs(prev["xg_diff"] - result["xg_diff"]) < 0.3:
@@ -424,7 +436,6 @@ def monitor():
                 total_signals += 1
                 print(f"    📤 {result['match']} | {result['signal']}", flush=True)
 
-                # Регистрируем для проверки
                 today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
                 try:
                     s1, s2 = map(int, result["score"].split("-"))
@@ -433,18 +444,18 @@ def monitor():
 
                 if gid not in pending_checks:
                     pending_checks[gid] = {
-                        "team1":     result["team1"],
-                        "team2":     result["team2"],
-                        "match":     result["match"],
-                        "date_str":  today,
-                        "old_s1":    s1,
-                        "old_s2":    s2,
-                        "minute":    result["minute"],
-                        "signal_ts": now,
+                        "team1":      result["team1"],
+                        "team2":      result["team2"],
+                        "match":      result["match"],
+                        "date_str":   today,
+                        "old_s1":     s1,
+                        "old_s2":     s2,
+                        "minute":     result["minute"],
+                        "signal_ts":  now,
                         "message_id": msg_id,
-                        "base_text": text,
+                        "base_text":  text,
                         "check_after": now + CHECK_FIRST_AFTER,
-                        "attempts":  0,
+                        "attempts":   0,
                     }
 
                 time.sleep(1)
@@ -462,20 +473,33 @@ def monitor():
 # =====================================================================
 def main():
     print("🚀 БОТ-МОНИТОР ФУТБОЛЬНЫХ АНОМАЛИЙ ЗАПУЩЕН", flush=True)
-    print(f"⏱️ Интервал: {UPDATE_INTERVAL} сек", flush=True)
     print(f"📋 Лиг: {len(LEAGUES)}", flush=True)
     print(f"🎯 Пороги: xG diff ≥ {MIN_XG_DIFF}, удары ≥ {MIN_SHOTS_DIFF}, "
           f"атаки ≥ {MIN_ATT_DIFF}, мин ≤ {MAX_MINUTE}", flush=True)
-    print(f"🔍 Проверка результата: через {CHECK_FIRST_AFTER//60} мин, "
+    print(f"🔍 Проверка: через {CHECK_FIRST_AFTER//60} мин, "
           f"повтор каждые {CHECK_REPEAT_AFTER//60} мин, "
           f"макс {CHECK_MAX_ATTEMPTS} попыток", flush=True)
+    print(f"😴 Ночной режим: с {SLEEP_HOUR_START:02d}:00 до {SLEEP_HOUR_END:02d}:00 МСК", flush=True)
     print("=" * 60, flush=True)
 
     while True:
         try:
-            monitor()
-            check_pending_results()
-            time.sleep(UPDATE_INTERVAL)
+            if is_active_time():
+                # День: мониторинг + проверки
+                monitor()
+                check_pending_results()
+                time.sleep(UPDATE_INTERVAL)
+            else:
+                # Ночь: только проверки, без мониторинга
+                now_str = datetime.now(MOSCOW_TZ).strftime('%H:%M')
+                if pending_checks:
+                    print(f"😴 Ночь ({now_str} МСК) — только проверки "
+                          f"({len(pending_checks)} в очереди)", flush=True)
+                    check_pending_results()
+                else:
+                    print(f"😴 Ночь ({now_str} МСК) — спим", flush=True)
+                time.sleep(600)   # проверяем раз в 10 минут
+
         except KeyboardInterrupt:
             print("⏹️ Остановлено", flush=True)
             break
