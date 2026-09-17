@@ -53,6 +53,19 @@ MAX_MINUTE     = 80
 UPDATE_INTERVAL = 60
 ANTISPAM_SEC   = 600
 
+# Проверка результата
+CHECK_FIRST_AFTER = 1800     # первая проверка через 30 мин
+CHECK_REPEAT_AFTER = 1800    # повторная проверка через 30 мин
+CHECK_MAX_ATTEMPTS = 4       # максимум 4 проверки
+
+RUSCORE_URL = "https://api-statistics.ruscore.ru/v1/events"
+RUSCORE_PARAMS = {
+    "app_id": "ruscore",
+    "api_key": "yAUBmZp9XJgh3US6bN1GZKtAYsFRKET6",
+    "lang": "ru",
+    "tz": "Europe/Moscow"
+}
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -67,23 +80,18 @@ print("✅ Настройки загружены", flush=True)
 # =====================================================================
 # СОСТОЯНИЕ
 # =====================================================================
-sent_signals = {}
+sent_signals = {}       # {game_id: {"xg_diff": float, "ts": int}}
+pending_checks = {}     # {game_id: {...данные сигнала + message_id + текст...}}
 
 # =====================================================================
-# API
+# API 1WIN
 # =====================================================================
 def get_league_games(league_id):
-    """Возвращает все матчи лиги с уже встроенной статистикой."""
     url = f"{BASE_URL}/service-api/LiveFeed/GetGameZip"
     params = {
-        "id": league_id,
-        "isSubGames": "true",
-        "GroupEvents": "true",
-        "countevents": 250,
-        "grMode": 4,
-        "country": 1,
-        "marketType": 1,
-        "isNewBuilder": "true"
+        "id": league_id, "isSubGames": "true", "GroupEvents": "true",
+        "countevents": 250, "grMode": 4, "country": 1,
+        "marketType": 1, "isNewBuilder": "true"
     }
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=10)
@@ -104,7 +112,6 @@ def get_league_games(league_id):
 # АНАЛИЗ
 # =====================================================================
 def parse_stats(game):
-    """Извлекает статистику из tabloStats."""
     stats = {}
     tablo = game.get("tabloStats") or {}
     for key, items in tablo.items():
@@ -118,7 +125,6 @@ def parse_stats(game):
     return stats
 
 def analyze_game(game):
-    """Возвращает dict с сигналом или None."""
     if not isinstance(game, dict):
         return None
     if game.get("isFinished"):
@@ -169,13 +175,13 @@ def analyze_game(game):
 
     if xg1 > xg2:
         dominant = o1
-        weak = o2
     else:
         dominant = o2
-        weak = o1
 
     return {
         "game_id":   game_id,
+        "team1":     o1,
+        "team2":     o2,
         "match":     f"{o1} — {o2}",
         "score":     score,
         "minute":    minute,
@@ -185,7 +191,6 @@ def analyze_game(game):
         "shots":     f"{shots1} — {shots2}",
         "attacks":   f"{att1} — {att2}",
         "dominant":  dominant,
-        "weak":      weak,
         "signal":    signal_type,
     }
 
@@ -198,9 +203,22 @@ def send_telegram(text):
                           json={"chat_id": CHAT_ID,
                                 "text": text,
                                 "parse_mode": "HTML"})
+        if r.status_code == 200:
+            return r.json()["result"]["message_id"]
+    except Exception as e:
+        print(f"❌ TG send: {e}", flush=True)
+    return None
+
+def edit_telegram(message_id, text):
+    try:
+        r = requests.post(API + "/editMessageText",
+                          json={"chat_id": CHAT_ID,
+                                "message_id": message_id,
+                                "text": text,
+                                "parse_mode": "HTML"})
         return r.status_code == 200
     except Exception as e:
-        print(f"❌ TG: {e}", flush=True)
+        print(f"❌ TG edit: {e}", flush=True)
         return False
 
 def format_signal(s):
@@ -213,6 +231,157 @@ def format_signal(s):
         f"⚔️ Опасные атаки: {s['attacks']}\n"
         f"👉 Доминирует: <b>{s['dominant']}</b>"
     )
+
+def format_with_result(base_text, result_line):
+    """Добавляет строку результата к базовому тексту сигнала."""
+    return f"{base_text}\n\n{result_line}"
+
+# =====================================================================
+# ПРОВЕРКА ЧЕРЕЗ RUSCORE
+# =====================================================================
+def fetch_ruscore_events(date_str):
+    params = dict(RUSCORE_PARAMS)
+    params["date"] = date_str
+    try:
+        r = requests.get(RUSCORE_URL, params=params, timeout=15)
+        if r.status_code != 200:
+            print(f"⚠️ ruscore HTTP {r.status_code}", flush=True)
+            return []
+        data = r.json()
+        events = []
+        for block in data.get("data", []):
+            for ev in block.get("events", []):
+                ev["_league"] = block.get("name", "")
+                events.append(ev)
+        return events
+    except Exception as e:
+        print(f"❌ ruscore: {e}", flush=True)
+        return []
+
+def normalize_name(s):
+    if not s:
+        return ""
+    return (
+        s.lower()
+        .replace(" ", "").replace("-", "").replace("'", "")
+        .replace("ё", "е").replace(".", "").strip()
+    )
+
+def find_match(events, team1, team2):
+    n1 = normalize_name(team1)
+    n2 = normalize_name(team2)
+    for ev in events:
+        h = normalize_name((ev.get("home") or {}).get("name", ""))
+        a = normalize_name((ev.get("away") or {}).get("name", ""))
+        if (n1 in h or h in n1) and (n2 in a or a in n2):
+            return ev
+        if (n1 in a or a in n1) and (n2 in h or h in n2):
+            return ev
+    return None
+
+def parse_score_from_ruscore(ev):
+    score_list = ev.get("score") or []
+    for s in score_list:
+        if s.get("type") == "overall":
+            h = s.get("home")
+            a = s.get("away")
+            if h == "" or a == "":
+                return None, None
+            try:
+                return int(h), int(a)
+            except (ValueError, TypeError):
+                return None, None
+    return None, None
+
+def check_pending_results():
+    global pending_checks
+    if not pending_checks:
+        return
+
+    now = int(time.time())
+
+    # Группируем по дате
+    by_date = {}
+    for gid, info in pending_checks.items():
+        if now < info.get("check_after", 0):
+            continue
+        by_date.setdefault(info["date_str"], []).append(gid)
+
+    for date_str, gids in by_date.items():
+        events = fetch_ruscore_events(date_str)
+        if not events:
+            # не удалось получить список — отложим
+            for gid in gids:
+                pending_checks[gid]["check_after"] = now + CHECK_REPEAT_AFTER
+            continue
+
+        for gid in gids:
+            info = pending_checks.get(gid)
+            if not info:
+                continue
+
+            ev = find_match(events, info["team1"], info["team2"])
+            if not ev:
+                # не нашли матч — повторим позже
+                info["attempts"] = info.get("attempts", 0) + 1
+                info["check_after"] = now + CHECK_REPEAT_AFTER
+                if info["attempts"] >= CHECK_MAX_ATTEMPTS:
+                    # сдаёмся
+                    line = "❓ <b>РЕЗУЛЬТАТ НЕ НАЙДЕН</b>\n(матч не найден в ruscore)"
+                    edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                    del pending_checks[gid]
+                continue
+
+            h_score, a_score = parse_score_from_ruscore(ev)
+            status = (ev.get("status") or {}).get("label", "")
+
+            # счёт ещё пустой — ждём
+            if h_score is None:
+                info["check_after"] = now + CHECK_REPEAT_AFTER
+                continue
+
+            old_s1 = info["old_s1"]
+            old_s2 = info["old_s2"]
+
+            goal_happened = (h_score != old_s1) or (a_score != old_s2)
+            is_finished = status in ("finished", "ended")
+
+            if goal_happened:
+                elapsed = (now - info["signal_ts"]) // 60
+                line = (
+                    f"✅ <b>ЗАШЛО</b>\n"
+                    f"📊 Было: {old_s1}-{old_s2} ({info['minute']}')\n"
+                    f"📊 Стало: {h_score}-{a_score}\n"
+                    f"⏱ Через ~{elapsed} мин"
+                )
+                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                print(f"✅ ЗАШЛО: {info['match']}", flush=True)
+                del pending_checks[gid]
+                continue
+
+            if is_finished:
+                line = (
+                    f"❌ <b>НЕ ЗАШЛО</b>\n"
+                    f"📊 Итог: {h_score}-{a_score}\n"
+                    f"⏱ Матч завершён"
+                )
+                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                print(f"❌ НЕ ЗАШЛО: {info['match']}", flush=True)
+                del pending_checks[gid]
+                continue
+
+            # ещё играют — повторная проверка
+            info["attempts"] = info.get("attempts", 0) + 1
+            info["check_after"] = now + CHECK_REPEAT_AFTER
+
+            if info["attempts"] >= CHECK_MAX_ATTEMPTS:
+                line = (
+                    f"⏱ <b>БЕЗ РЕЗУЛЬТАТА</b>\n"
+                    f"📊 Счёт: {h_score}-{a_score}\n"
+                    f"(проверено {info['attempts']} раз)"
+                )
+                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                del pending_checks[gid]
 
 # =====================================================================
 # ОСНОВНОЙ ЦИКЛ
@@ -241,21 +410,49 @@ def monitor():
             gid = result["game_id"]
             now = int(time.time())
 
+            # антиспам
             prev = sent_signals.get(gid)
             if prev and (now - prev["ts"]) < ANTISPAM_SEC:
                 if abs(prev["xg_diff"] - result["xg_diff"]) < 0.3:
                     continue
 
             text = format_signal(result)
-            if send_telegram(text):
+            msg_id = send_telegram(text)
+
+            if msg_id:
                 sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now}
                 total_signals += 1
                 print(f"    📤 {result['match']} | {result['signal']}", flush=True)
+
+                # Регистрируем для проверки
+                today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+                try:
+                    s1, s2 = map(int, result["score"].split("-"))
+                except ValueError:
+                    s1, s2 = 0, 0
+
+                if gid not in pending_checks:
+                    pending_checks[gid] = {
+                        "team1":     result["team1"],
+                        "team2":     result["team2"],
+                        "match":     result["match"],
+                        "date_str":  today,
+                        "old_s1":    s1,
+                        "old_s2":    s2,
+                        "minute":    result["minute"],
+                        "signal_ts": now,
+                        "message_id": msg_id,
+                        "base_text": text,
+                        "check_after": now + CHECK_FIRST_AFTER,
+                        "attempts":  0,
+                    }
+
                 time.sleep(1)
 
         time.sleep(2)
 
-    print(f"✅ Итого: {total_games} матчей, {total_signals} сигналов", flush=True)
+    print(f"✅ Итого: {total_games} матчей, {total_signals} сигналов, "
+          f"на проверке: {len(pending_checks)}", flush=True)
 
     now = int(time.time())
     sent_signals = {k: v for k, v in sent_signals.items() if now - v["ts"] < 1800}
@@ -269,11 +466,15 @@ def main():
     print(f"📋 Лиг: {len(LEAGUES)}", flush=True)
     print(f"🎯 Пороги: xG diff ≥ {MIN_XG_DIFF}, удары ≥ {MIN_SHOTS_DIFF}, "
           f"атаки ≥ {MIN_ATT_DIFF}, мин ≤ {MAX_MINUTE}", flush=True)
+    print(f"🔍 Проверка результата: через {CHECK_FIRST_AFTER//60} мин, "
+          f"повтор каждые {CHECK_REPEAT_AFTER//60} мин, "
+          f"макс {CHECK_MAX_ATTEMPTS} попыток", flush=True)
     print("=" * 60, flush=True)
 
     while True:
         try:
             monitor()
+            check_pending_results()
             time.sleep(UPDATE_INTERVAL)
         except KeyboardInterrupt:
             print("⏹️ Остановлено", flush=True)
