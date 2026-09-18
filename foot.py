@@ -402,9 +402,10 @@ def check_pending_results():
 # РАСПИСАНИЕ
 # =====================================================================
 def get_today_schedule():
-    """Возвращает список матчей на сегодня с временем начала."""
     today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+    print(f"📅 Запрос расписания на {today}...", flush=True)
     events = fetch_ruscore_events(today)
+    print(f"📅 Получено {len(events)} матчей", flush=True)
 
     schedule = []
     for ev in events:
@@ -413,15 +414,24 @@ def get_today_schedule():
             continue
         try:
             dt = datetime.fromisoformat(time_str)
-            # Приводим к МСК
-            dt = dt.astimezone(MOSCOW_TZ)
+            # Если dt уже с таймзоной — не переводим, оставляем как есть
+            if dt.tzinfo is None:
+                dt = MOSCOW_TZ.localize(dt)
+            else:
+                dt = dt.astimezone(MOSCOW_TZ)
+            home = (ev.get("home") or {}).get("name", "?")
+            away = (ev.get("away") or {}).get("name", "?")
+            league = ev.get("_league", "?")
+            print(f"   ✓ {home} — {away}  ({league})  {dt.strftime('%H:%M')}", flush=True)
             schedule.append({
                 "time": dt,
-                "match": f"{(ev.get('home') or {}).get('name')} — "
-                         f"{(ev.get('away') or {}).get('name')}",
+                "match": f"{home} — {away}",
             })
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            print(f"   ⚠️ Ошибка парсинга: {time_str} | {e}", flush=True)
             continue
+
+    print(f"📅 Итого матчей с временем: {len(schedule)}", flush=True)
     return schedule
 
 def get_monitoring_windows(schedule):
