@@ -29,33 +29,33 @@ BASE_URL = "https://1xlite-7720.pro"
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # =====================================================================
-# ТОП-ЛИГИ (для мониторинга xG)
+# ТОП-ЛИГИ (по ID из live-feed)
 # =====================================================================
-LEAGUES = {
-    "🏆 Лига Чемпионов УЕФА":            118587,
-    "🏆 Лига Европы УЕФА":               118593,
-    "🏆 Лига Конференций УЕФА":          2252762,
-    "🏴 Чемпионат Англии. АПЛ":          88637,
-    "🇩🇪 Чемпионат Германии. Бундеслига": 96463,
-    "🇪🇸 Чемпионат Испании. Примера":     127733,
-    "🇮🇹 Чемпионат Италии. Серия А":      110163,
-    "🇫🇷 Чемпионат Франции. Лига 1":      12821,
-    "🇷🇺 Чемпионат России. РПЛ":          225733,
+LEAGUE_IDS = {
+    88637:   "🏴 Чемпионат Англии. АПЛ",
+    96463:   "🇩🇪 Чемпионат Германии. Бундеслига",
+    127733:  "🇪🇸 Чемпионат Испании. Примера",
+    110163:  "🇮🇹 Чемпионат Италии. Серия А",
+    12821:   "🇫🇷 Чемпионат Франции. Лига 1",
+    225733:  "🇷🇺 Чемпионат России. РПЛ",
+    118587:  "🏆 Лига Чемпионов УЕФА",
+    118593:  "🏆 Лига Европы УЕФА",
+    2252762: "🏆 Лига Конференций УЕФА",
 }
 
 # =====================================================================
-# ФИЛЬТР ЛИГ В РАСПИСАНИИ RUSCORE
+# ФИЛЬТР ЛИГ ДЛЯ RUSCORE (по названию)
 # =====================================================================
 RUSCORE_LEAGUES_FILTER = [
-    "премьер-лига",            # АПЛ
-    "бундеслига",              # Германия
-    "ла лига",                 # Испания
-    "серия а",                 # Италия
-    "лига 1",                  # Франция
-    "россии", "рпл",           # РПЛ
-    "лига чемпионов",          # ЛЧ
-    "лига европы",             # ЛЕ
-    "лига конференций",        # ЛК
+    "премьер-лига",
+    "бундеслига",
+    "ла лига",
+    "серия а",
+    "лига 1",
+    "россии", "рпл",
+    "лига чемпионов",
+    "лига европы",
+    "лига конференций",
 ]
 
 # =====================================================================
@@ -88,12 +88,15 @@ RUSCORE_PARAMS = {
     "tz": "Europe/Moscow"
 }
 
+# =====================================================================
+# ЗАГОЛОВКИ
+# =====================================================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     "Content-Type": "application/json",
-    "Referer": f"{BASE_URL}/ru",
+    "Referer": f"{BASE_URL}/ru/live",
     "Origin": BASE_URL,
     "is-srv": "false",
     "priority": "u=1, i",
@@ -107,7 +110,7 @@ HEADERS = {
     "x-hd": "3li6mKmIg5PTz2GyMGs8vd22dQHcuhYMxRR+e2T8PWMKD8rRCXsQ9PZUzd0+DiICw+4UGuu6622DymSOgU8y/wm+8LUGmxhDyoQA7IBZzk026xR8NHvlW13dPxN01ZVT6ynO+oIZq7BtjToZcIPK6TSh+paC+hAayBLg/D3p82x7g5sbuQ9Nip3yB2Vak/p/fB5qVui4XFnebDkoFIMhSBA/ehM2g/B/GOfZQon1E2v1GdApeM39i74erqrqTrM9+/HYBUiqEXxrazx02w==",
     "x-requested-with": "XMLHttpRequest",
     "x-svc-source": "__BETTING_APP__",
-    "Cookie": "platform_type=desktop; auid=ua+l62qti/C6vzE7AxyDAg==; lng=ru; cookies_agree_type=3; tzo=3; is12h=0; fatman_uuid=6130f537-4410-1609-a97d-d8e42c9bd207; che_g=56f6092d-82cb-434a-aeac-681011664974; referral_values=%7B%22type%22%3A%22reflinkid%22%2C%22val%22%3A%22d_3837289m_1599c_%22%2C%22additional%22%3A%7B%22name_tag%22%3A%22tag%22%7D%7D; reflinkid=d_3837289m_1599c_; SESSION=a0b5dfe7c481dc01770a3b152bf27652; sh.session.id=f6faa86a-0670-459e-8327-f11ca865b071; _ga=GA1.1.1249863541.1789758468; _ga_7JGWL9SV66=GS2.1.s1789758468$o1$g0$t1789758546$j45$l0$h1289626781; window_width=150",
+    "Cookie": "platform_type=desktop; auid=ua+l62qti/C6vzE7AxyDAg==; lng=ru; cookies_agree_type=3; tzo=3; is12h=0; fatman_uuid=6130f537-4410-1609-a97d-d8e42c9bd207; che_g=56f6092d-82cb-434a-aeac-681011664974; referral_values=%7B%22type%22%3A%22reflinkid%22%2C%22val%22%3A%22d_3837289m_1599c_%22%2C%22additional%22%3A%7B%22name_tag%22%3A%22tag%22%7D%7D; reflinkid=d_3837289m_1599c_; SESSION=a0b5dfe7c481dc01770a3b152bf27652; sh.session.id=f6faa86a-0670-459e-8327-f11ca865b071; _ga=GA1.1.1249863541.1789758468; window_width=1091; _ga_7JGWL9SV66=GS2.1.s1789758468$o1$g1$t1789759197$j15$l0$h1289626781",
 }
 
 RUSCORE_HEADERS = {
@@ -145,32 +148,35 @@ def is_active_time():
     return True
 
 # =====================================================================
-# API 1WIN
+# API 1XBET — LIVE FEED (ВСЕ МАТЧИ ОДНИМ ЗАПРОСОМ)
 # =====================================================================
-def get_league_games(league_id):
-    url = f"{BASE_URL}/service-api/LiveFeed/GetGameZip"
+def get_live_games():
+    """Тянет все live-матчи со статистикой одним запросом."""
+    url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
     params = {
-        "id": league_id, "isSubGames": "true", "GroupEvents": "true",
-        "countevents": 250, "grMode": 4, "country": 1,
-        "marketType": 1, "isNewBuilder": "true"
+        "cfView": 3,
+        "count": 40,
+        "fcountry": 1,
+        "gr": 2336,
+        "grMode": 4,
+        "lng": "ru",
+        "ref": 1,
     }
     try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
-        print(f"   🔎 [{league_id}] HTTP {r.status_code}", flush=True)
+        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        print(f"   🔎 Live-feed: HTTP {r.status_code}", flush=True)
         if r.status_code != 200:
-            print(f"   ⚠️ [{league_id}] HTTP {r.status_code}", flush=True)
+            print(f"   ⚠️ Live-feed HTTP {r.status_code}", flush=True)
             return []
         data = r.json()
-        print(f"   🔎 [{league_id}] Success={data.get('Success')} "
-              f"Value={type(data.get('Value')).__name__}", flush=True)
-        games = data.get("Value", [])
-        if not isinstance(games, list):
-            games = [games]
-        games = [g for g in games if isinstance(g, dict)]
-        print(f"   🔎 [{league_id}] Матчей: {len(games)}", flush=True)
+        if not isinstance(data, list):
+            print(f"   ⚠️ Live-feed: ответ не список, тип {type(data).__name__}", flush=True)
+            return []
+        games = [g for g in data if isinstance(g, dict)]
+        print(f"   🔎 Live-feed: получено {len(games)} матчей", flush=True)
         return games
     except Exception as e:
-        print(f"   ❌ [{league_id}] {e}", flush=True)
+        print(f"   ❌ Live-feed: {e}", flush=True)
         return []
 
 # =====================================================================
@@ -178,7 +184,7 @@ def get_league_games(league_id):
 # =====================================================================
 def parse_stats(game):
     stats = {}
-    tablo = game.get("tabloStats") or {}
+    tablo = ((game.get("scores") or {}).get("tabloStats")) or {}
     for key, items in tablo.items():
         if isinstance(items, list):
             for item in items:
@@ -192,21 +198,32 @@ def parse_stats(game):
 def analyze_game(game):
     if not isinstance(game, dict):
         return None
-    if game.get("isFinished"):
-        return None
-    if not game.get("tabloStats"):
+
+    # Только футбол
+    sport_id = (game.get("sport") or {}).get("id")
+    if sport_id != 1:
         return None
 
-    o1 = (game.get("opponent1") or {}).get("fullName", "?")
-    o2 = (game.get("opponent2") or {}).get("fullName", "?")
-    score = (game.get("scores") or {}).get("fullScore", "0-0")
-    period = game.get("currentPeriodName", "")
-    game_id = game.get("id")
+    # Только наши лиги
+    liga_id = (game.get("liga") or {}).get("id")
+    if liga_id not in LEAGUE_IDS:
+        return None
 
-    timer = game.get("timer") or {}
+    # Завершённые пропускаем
+    scores = game.get("scores") or {}
+    status_line = scores.get("statusLineStr", "")
+    current_period = scores.get("currentPeriodName", "")
+    if current_period == "Игра завершена" or status_line == "":
+        # Пустая statusLineStr = событие не идёт
+        if not scores.get("timer", {}).get("timeRun"):
+            return None
+
+    # Таймер
+    timer = scores.get("timer") or {}
     time_sec = timer.get("timeSec", 0)
     minute = time_sec // 60
 
+    # Статистика
     stats = parse_stats(game)
     xg = stats.get("xG", {})
     shots = stats.get("Удары в створ", {})
@@ -238,16 +255,22 @@ def analyze_game(game):
     if not signal_type:
         return None
 
+    o1 = (game.get("opponent1") or {}).get("fullName", "?")
+    o2 = (game.get("opponent2") or {}).get("fullName", "?")
+    score = scores.get("fullScore", "0-0")
+
     dominant = o1 if xg1 > xg2 else o2
+    league_name = LEAGUE_IDS.get(liga_id, "")
 
     return {
-        "game_id":   game_id,
+        "game_id":   game.get("id"),
         "team1":     o1,
         "team2":     o2,
         "match":     f"{o1} — {o2}",
+        "league":    league_name,
         "score":     score,
         "minute":    minute,
-        "period":    period,
+        "period":    current_period,
         "xg":        f"{xg1:.2f} — {xg2:.2f}",
         "xg_diff":   round(xg_diff, 2),
         "shots":     f"{shots1} — {shots2}",
@@ -286,6 +309,7 @@ def edit_telegram(message_id, text):
 def format_signal(s):
     return (
         f"{s['signal']}\n"
+        f"{s['league']}\n"
         f"⚽ <b>{s['match']}</b>\n"
         f"📊 Счёт: <b>{s['score']}</b> | ⏱ {s['minute']}'\n"
         f"🎯 xG: {s['xg']}  (разница {s['xg_diff']})\n"
@@ -307,7 +331,6 @@ def fetch_ruscore_events(date_str):
         r = requests.get(RUSCORE_URL, params=params, headers=RUSCORE_HEADERS, timeout=15)
         print(f"📅 ruscore статус: {r.status_code}", flush=True)
         if r.status_code != 200:
-            print(f"⚠️ ruscore HTTP {r.status_code}", flush=True)
             return []
         data = r.json()
         events = []
@@ -361,7 +384,6 @@ def check_pending_results():
         return
 
     now = int(time.time())
-
     by_date = {}
     for gid, info in pending_checks.items():
         if now < info.get("check_after", 0):
@@ -483,8 +505,8 @@ def get_today_schedule():
             away = (ev.get("away") or {}).get("name", "?")
             print(f"   ✓ {home} — {away}  ({league})  {dt.strftime('%H:%M')}", flush=True)
             schedule.append({"time": dt, "match": f"{home} — {away}"})
-        except (ValueError, TypeError) as e:
-            print(f"   ⚠️ Ошибка парсинга: {time_str} | {e}", flush=True)
+        except (ValueError, TypeError):
+            continue
 
     print(f"📅 Наших матчей: {len(schedule)} (пропущено чужих: {skipped})", flush=True)
     return schedule
@@ -508,7 +530,7 @@ def refresh_schedule_if_needed():
     now = datetime.now(MOSCOW_TZ)
     if schedule_updated_at and (now - schedule_updated_at).total_seconds() < SCHEDULE_REFRESH_SEC:
         return
-    print(f"📅 Обновляем расписание...", flush=True)
+    print("📅 Обновляем расписание...", flush=True)
     schedule = get_today_schedule()
     schedule_windows = get_monitoring_windows(schedule)
     schedule_updated_at = now
@@ -535,62 +557,69 @@ def monitor():
     global sent_signals
     print(f"🔄 Цикл: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}", flush=True)
 
-    total_games = 0
+    games = get_live_games()
+    if not games:
+        print("✅ Итого: 0 матчей (live-feed пустой)", flush=True)
+        return
+
+    total_our = 0
     total_signals = 0
 
-    for league_name, league_id in LEAGUES.items():
-        games = get_league_games(league_id)
-        if not games:
-            continue
-        total_games += len(games)
-        print(f"  📋 {league_name}: {len(games)} матчей", flush=True)
+    # Группируем по лигам для лога
+    by_league = {}
+    for game in games:
+        liga_id = (game.get("liga") or {}).get("id")
+        if liga_id in LEAGUE_IDS:
+            by_league[liga_id] = by_league.get(liga_id, 0) + 1
 
-        for game in games:
-            result = analyze_game(game)
-            if not result:
+    for liga_id, cnt in by_league.items():
+        print(f"  📋 {LEAGUE_IDS[liga_id]}: {cnt} матчей", flush=True)
+
+    for game in games:
+        result = analyze_game(game)
+        if not result:
+            continue
+
+        total_our += 1
+        gid = result["game_id"]
+        now = int(time.time())
+
+        prev = sent_signals.get(gid)
+        if prev and (now - prev["ts"]) < ANTISPAM_SEC:
+            if abs(prev["xg_diff"] - result["xg_diff"]) < 0.3:
                 continue
 
-            gid = result["game_id"]
-            now = int(time.time())
+        text = format_signal(result)
+        msg_id = send_telegram(text)
+        if msg_id:
+            sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now}
+            total_signals += 1
+            print(f"    📤 {result['match']} | {result['signal']}", flush=True)
 
-            prev = sent_signals.get(gid)
-            if prev and (now - prev["ts"]) < ANTISPAM_SEC:
-                if abs(prev["xg_diff"] - result["xg_diff"]) < 0.3:
-                    continue
+            today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+            try:
+                s1, s2 = map(int, result["score"].split("-"))
+            except ValueError:
+                s1, s2 = 0, 0
 
-            text = format_signal(result)
-            msg_id = send_telegram(text)
+            if gid not in pending_checks:
+                pending_checks[gid] = {
+                    "team1":      result["team1"],
+                    "team2":      result["team2"],
+                    "match":      result["match"],
+                    "date_str":   today,
+                    "old_s1":     s1,
+                    "old_s2":     s2,
+                    "minute":     result["minute"],
+                    "signal_ts":  now,
+                    "message_id": msg_id,
+                    "base_text":  text,
+                    "check_after": now + CHECK_FIRST_AFTER,
+                    "attempts":   0,
+                }
+            time.sleep(1)
 
-            if msg_id:
-                sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now}
-                total_signals += 1
-                print(f"    📤 {result['match']} | {result['signal']}", flush=True)
-
-                today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
-                try:
-                    s1, s2 = map(int, result["score"].split("-"))
-                except ValueError:
-                    s1, s2 = 0, 0
-
-                if gid not in pending_checks:
-                    pending_checks[gid] = {
-                        "team1":      result["team1"],
-                        "team2":      result["team2"],
-                        "match":      result["match"],
-                        "date_str":   today,
-                        "old_s1":     s1,
-                        "old_s2":     s2,
-                        "minute":     result["minute"],
-                        "signal_ts":  now,
-                        "message_id": msg_id,
-                        "base_text":  text,
-                        "check_after": now + CHECK_FIRST_AFTER,
-                        "attempts":   0,
-                    }
-                time.sleep(1)
-        time.sleep(2)
-
-    print(f"✅ Итого: {total_games} матчей, {total_signals} сигналов, "
+    print(f"✅ Итого: {total_our} наших матчей, {total_signals} сигналов, "
           f"на проверке: {len(pending_checks)}", flush=True)
 
     now = int(time.time())
@@ -601,7 +630,7 @@ def monitor():
 # =====================================================================
 def main():
     print("🚀 БОТ-МОНИТОР ФУТБОЛЬНЫХ АНОМАЛИЙ ЗАПУЩЕН", flush=True)
-    print(f"📋 Лиг: {len(LEAGUES)}", flush=True)
+    print(f"📋 Лиг: {len(LEAGUE_IDS)}", flush=True)
     print(f"🎯 Пороги: xG diff ≥ {MIN_XG_DIFF}, удары ≥ {MIN_SHOTS_DIFF}, "
           f"атаки ≥ {MIN_ATT_DIFF}, мин ≤ {MAX_MINUTE}", flush=True)
     print(f"🔍 Проверка: через {CHECK_FIRST_AFTER//60} мин, "
