@@ -584,10 +584,30 @@ def monitor():
         gid = result["game_id"]
         now = int(time.time())
 
+        # ✅ ФИКС 1: Проверка по pending_checks (переживает рестарт)
+        if gid in pending_checks:
+            prev_xg = pending_checks[gid].get("xg_diff", 0)
+            if abs(prev_xg - result["xg_diff"]) < 0.5:
+                print(f"    ⏭️ Пропуск {result['match']} — уже есть в pending", flush=True)
+                continue
+
+        # ✅ ФИКС 2: Проверка по sent_signals (антиспам в памяти)
         prev = sent_signals.get(gid)
         if prev and (now - prev["ts"]) < ANTISPAM_SEC:
             if abs(prev["xg_diff"] - result["xg_diff"]) < 0.3:
+                print(f"    ⏭️ Пропуск {result['match']} — антиспам", flush=True)
                 continue
+
+        # ✅ ФИКС 3: Проверка, не слали ли уже этот же сигнал недавно
+        # (если бот рестартовал — sent_signals пуст, но pending_checks остался)
+        already_sent = False
+        for gid_check, info in pending_checks.items():
+            if gid_check == gid:
+                already_sent = True
+                break
+        if already_sent:
+            print(f"    ⏭️ Пропуск {result['match']} — уже отправляли", flush=True)
+            continue
 
         text = format_signal(result)
         msg_id = send_telegram(text)
@@ -602,21 +622,21 @@ def monitor():
             except ValueError:
                 s1, s2 = 0, 0
 
-            if gid not in pending_checks:
-                pending_checks[gid] = {
-                    "team1":      result["team1"],
-                    "team2":      result["team2"],
-                    "match":      result["match"],
-                    "date_str":   today,
-                    "old_s1":     s1,
-                    "old_s2":     s2,
-                    "minute":     result["minute"],
-                    "signal_ts":  now,
-                    "message_id": msg_id,
-                    "base_text":  text,
-                    "check_after": now + CHECK_FIRST_AFTER,
-                    "attempts":   0,
-                }
+            pending_checks[gid] = {
+                "team1":      result["team1"],
+                "team2":      result["team2"],
+                "match":      result["match"],
+                "date_str":   today,
+                "old_s1":     s1,
+                "old_s2":     s2,
+                "minute":     result["minute"],
+                "signal_ts":  now,
+                "message_id": msg_id,
+                "base_text":  text,
+                "xg_diff":    result["xg_diff"],   # ✅ сохраняем xg для антиспама
+                "check_after": now + CHECK_FIRST_AFTER,
+                "attempts":   0,
+            }
             time.sleep(1)
 
     print(f"✅ Итого: {total_our} наших матчей, {total_signals} сигналов, "
