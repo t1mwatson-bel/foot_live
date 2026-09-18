@@ -156,17 +156,21 @@ def get_league_games(league_id):
     }
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        print(f"   🔎 [{league_id}] HTTP {r.status_code}", flush=True)
         if r.status_code != 200:
-            print(f"⚠️ [{league_id}] HTTP {r.status_code}", flush=True)
+            print(f"   ⚠️ [{league_id}] HTTP {r.status_code}", flush=True)
             return []
         data = r.json()
+        print(f"   🔎 [{league_id}] Success={data.get('Success')} "
+              f"Value={type(data.get('Value')).__name__}", flush=True)
         games = data.get("Value", [])
         if not isinstance(games, list):
             games = [games]
         games = [g for g in games if isinstance(g, dict)]
+        print(f"   🔎 [{league_id}] Матчей: {len(games)}", flush=True)
         return games
     except Exception as e:
-        print(f"❌ [{league_id}] {e}", flush=True)
+        print(f"   ❌ [{league_id}] {e}", flush=True)
         return []
 
 # =====================================================================
