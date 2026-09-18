@@ -259,8 +259,25 @@ def format_with_result(base_text, result_line):
 def fetch_ruscore_events(date_str):
     params = dict(RUSCORE_PARAMS)
     params["date"] = date_str
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Origin": "https://ruscore.ru",
+        "Referer": "https://ruscore.ru/",
+        "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "YaBrowser";v="26.8", "Yowser";v="2.5"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+    }
+
     try:
-        r = requests.get(RUSCORE_URL, params=params, timeout=15)
+        r = requests.get(RUSCORE_URL, params=params, headers=headers, timeout=15)
+        print(f"📅 ruscore статус: {r.status_code}", flush=True)
         if r.status_code != 200:
             print(f"⚠️ ruscore HTTP {r.status_code}", flush=True)
             return []
