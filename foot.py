@@ -29,7 +29,7 @@ BASE_URL = "https://1xlite-36553.pro"
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # =====================================================================
-# ТОП-ЛИГИ
+# ТОП-ЛИГИ (для мониторинга xG)
 # =====================================================================
 LEAGUES = {
     "🏆 Лига Чемпионов УЕФА":            118587,
@@ -42,6 +42,21 @@ LEAGUES = {
     "🇫🇷 Чемпионат Франции. Лига 1":      12821,
     "🇷🇺 Чемпионат России. РПЛ":          225733,
 }
+
+# =====================================================================
+# ФИЛЬТР ЛИГ В РАСПИСАНИИ RUSCORE
+# =====================================================================
+RUSCORE_LEAGUES_FILTER = [
+    "премьер-лига",            # АПЛ
+    "бундеслига",              # Германия
+    "ла лига",                 # Испания
+    "серия а",                 # Италия
+    "лига 1",                  # Франция
+    "россии", "рпл",           # РПЛ
+    "лига чемпионов",          # ЛЧ
+    "лига европы",             # ЛЕ
+    "лига конференций",        # ЛК
+]
 
 # =====================================================================
 # ПОРОГИ
@@ -58,12 +73,12 @@ CHECK_FIRST_AFTER  = 1800
 CHECK_REPEAT_AFTER = 1800
 CHECK_MAX_ATTEMPTS = 4
 
-# Ночной режим (МСК): спит с 01:00 до 12:00
+# Ночной режим (МСК)
 SLEEP_HOUR_START = 1
 SLEEP_HOUR_END   = 12
 
 # Расписание
-SCHEDULE_REFRESH_SEC = 3600    # обновление раз в час
+SCHEDULE_REFRESH_SEC = 3600
 
 RUSCORE_URL = "https://api-statistics.ruscore.ru/v1/events"
 RUSCORE_PARAMS = {
@@ -82,6 +97,21 @@ HEADERS = {
               "SESSION=ae9f1b4deac37d41be6873b1acf03cf4"
 }
 
+RUSCORE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Origin": "https://ruscore.ru",
+    "Referer": "https://ruscore.ru/",
+    "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "YaBrowser";v="26.8", "Yowser";v="2.5"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+}
+
 print("✅ Настройки загружены", flush=True)
 
 # =====================================================================
@@ -89,16 +119,13 @@ print("✅ Настройки загружены", flush=True)
 # =====================================================================
 sent_signals = {}
 pending_checks = {}
-
-# Расписание
-schedule_windows = []       # список (start, end) — окна матчей
-schedule_updated_at = None  # когда обновляли
+schedule_windows = []
+schedule_updated_at = None
 
 # =====================================================================
 # АКТИВНОЕ ВРЕМЯ
 # =====================================================================
 def is_active_time():
-    """Активное время: 12:00 – 00:59 МСК."""
     hour = datetime.now(MOSCOW_TZ).hour
     if SLEEP_HOUR_START <= hour < SLEEP_HOUR_END:
         return False
@@ -254,29 +281,13 @@ def format_with_result(base_text, result_line):
     return f"{base_text}\n\n{result_line}"
 
 # =====================================================================
-# RUSCORE — ПРОВЕРКА РЕЗУЛЬТАТОВ
+# RUSCORE
 # =====================================================================
 def fetch_ruscore_events(date_str):
     params = dict(RUSCORE_PARAMS)
     params["date"] = date_str
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin": "https://ruscore.ru",
-        "Referer": "https://ruscore.ru/",
-        "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "YaBrowser";v="26.8", "Yowser";v="2.5"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-site",
-    }
-
     try:
-        r = requests.get(RUSCORE_URL, params=params, headers=headers, timeout=15)
+        r = requests.get(RUSCORE_URL, params=params, headers=RUSCORE_HEADERS, timeout=15)
         print(f"📅 ruscore статус: {r.status_code}", flush=True)
         if r.status_code != 200:
             print(f"⚠️ ruscore HTTP {r.status_code}", flush=True)
@@ -418,6 +429,15 @@ def check_pending_results():
 # =====================================================================
 # РАСПИСАНИЕ
 # =====================================================================
+def is_our_league(league_name):
+    if not league_name:
+        return False
+    low = league_name.lower()
+    for pattern in RUSCORE_LEAGUES_FILTER:
+        if pattern in low:
+            return True
+    return False
+
 def get_today_schedule():
     today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
     print(f"📅 Запрос расписания на {today}...", flush=True)
@@ -425,40 +445,38 @@ def get_today_schedule():
     print(f"📅 Получено {len(events)} матчей", flush=True)
 
     schedule = []
+    skipped = 0
     for ev in events:
+        league = ev.get("_league", "")
+        if not is_our_league(league):
+            skipped += 1
+            continue
+
         time_str = ev.get("time")
         if not time_str:
             continue
         try:
             dt = datetime.fromisoformat(time_str)
-            # Если dt уже с таймзоной — не переводим, оставляем как есть
             if dt.tzinfo is None:
                 dt = MOSCOW_TZ.localize(dt)
             else:
                 dt = dt.astimezone(MOSCOW_TZ)
+
             home = (ev.get("home") or {}).get("name", "?")
             away = (ev.get("away") or {}).get("name", "?")
-            league = ev.get("_league", "?")
             print(f"   ✓ {home} — {away}  ({league})  {dt.strftime('%H:%M')}", flush=True)
-            schedule.append({
-                "time": dt,
-                "match": f"{home} — {away}",
-            })
+            schedule.append({"time": dt, "match": f"{home} — {away}"})
         except (ValueError, TypeError) as e:
             print(f"   ⚠️ Ошибка парсинга: {time_str} | {e}", flush=True)
-            continue
 
-    print(f"📅 Итого матчей с временем: {len(schedule)}", flush=True)
+    print(f"📅 Наших матчей: {len(schedule)} (пропущено чужих: {skipped})", flush=True)
     return schedule
 
 def get_monitoring_windows(schedule):
-    """Объединяет времена матчей в окна (start, end)."""
     if not schedule:
         return []
-
     times = sorted([s["time"] for s in schedule])
     windows = [(t, t + timedelta(hours=2)) for t in times]
-
     merged = [windows[0]]
     for start, end in windows[1:]:
         last_start, last_end = merged[-1]
@@ -469,27 +487,22 @@ def get_monitoring_windows(schedule):
     return merged
 
 def refresh_schedule_if_needed():
-    """Обновляет расписание раз в час."""
     global schedule_windows, schedule_updated_at
     now = datetime.now(MOSCOW_TZ)
-
     if schedule_updated_at and (now - schedule_updated_at).total_seconds() < SCHEDULE_REFRESH_SEC:
         return
-
     print(f"📅 Обновляем расписание...", flush=True)
     schedule = get_today_schedule()
     schedule_windows = get_monitoring_windows(schedule)
     schedule_updated_at = now
-
     if schedule_windows:
         print(f"📅 Найдено {len(schedule_windows)} окон:", flush=True)
         for start, end in schedule_windows:
             print(f"   {start.strftime('%H:%M')} – {end.strftime('%H:%M')} МСК", flush=True)
     else:
-        print("📅 Матчей в топ-лигах сегодня нет", flush=True)
+        print("📅 Матчей в наших лигах сегодня нет", flush=True)
 
 def is_match_time():
-    """Проверяет, есть ли матч прямо сейчас."""
     if not schedule_windows:
         return False
     now = datetime.now(MOSCOW_TZ)
@@ -503,7 +516,6 @@ def is_match_time():
 # =====================================================================
 def monitor():
     global sent_signals
-
     print(f"🔄 Цикл: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}", flush=True)
 
     total_games = 0
@@ -513,7 +525,6 @@ def monitor():
         games = get_league_games(league_id)
         if not games:
             continue
-
         total_games += len(games)
         print(f"  📋 {league_name}: {len(games)} матчей", flush=True)
 
@@ -559,9 +570,7 @@ def monitor():
                         "check_after": now + CHECK_FIRST_AFTER,
                         "attempts":   0,
                     }
-
                 time.sleep(1)
-
         time.sleep(2)
 
     print(f"✅ Итого: {total_games} матчей, {total_signals} сигналов, "
@@ -582,30 +591,24 @@ def main():
           f"повтор каждые {CHECK_REPEAT_AFTER//60} мин, "
           f"макс {CHECK_MAX_ATTEMPTS} попыток", flush=True)
     print(f"😴 Ночной режим: с {SLEEP_HOUR_START:02d}:00 до {SLEEP_HOUR_END:02d}:00 МСК", flush=True)
-    print(f"📅 Расписание: обновление раз в час", flush=True)
     print("=" * 60, flush=True)
 
     while True:
         try:
-            now = datetime.now(MOSCOW_TZ)
-            now_str = now.strftime('%H:%M')
+            now_str = datetime.now(MOSCOW_TZ).strftime('%H:%M')
 
-            # Ночью — полный сон, НИЧЕГО не делаем
             if not is_active_time():
                 print(f"😴 Ночь ({now_str} МСК) — спим до 12:00", flush=True)
                 time.sleep(600)
                 continue
 
-            # Днём — обновляем расписание раз в час
             refresh_schedule_if_needed()
 
-            # Матчи идут?
             if is_match_time():
                 monitor()
                 check_pending_results()
                 time.sleep(UPDATE_INTERVAL)
             else:
-                # Матчей нет — только проверки сигналов
                 print(f"💤 Матчей нет ({now_str} МСК) — ждём", flush=True)
                 check_pending_results()
                 time.sleep(600)
