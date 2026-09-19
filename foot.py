@@ -29,7 +29,7 @@ BASE_URL = "https://1xlite-7720.pro"
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # =====================================================================
-# ТОП-ЛИГИ (по ID из live-feed)
+# ТОП-ЛИГИ
 # =====================================================================
 LEAGUE_IDS = {
     88637:   "🏴 Чемпионат Англии. АПЛ",
@@ -43,9 +43,6 @@ LEAGUE_IDS = {
     2252762: "🏆 Лига Конференций УЕФА",
 }
 
-# =====================================================================
-# ФИЛЬТР ЛИГ ДЛЯ RUSCORE (по названию)
-# =====================================================================
 RUSCORE_LEAGUES_FILTER = [
     "премьер-лига",
     "бундеслига",
@@ -68,12 +65,15 @@ MAX_MINUTE     = 80
 UPDATE_INTERVAL = 60
 ANTISPAM_SEC   = 600
 
+# ✅ ПАУЗА ПОСЛЕ ГОЛА
+GOAL_COOLDOWN_SEC = 600   # 10 минут
+
 # Проверка результата
 CHECK_FIRST_AFTER  = 1800
 CHECK_REPEAT_AFTER = 1800
 CHECK_MAX_ATTEMPTS = 4
 
-# Ночной режим (МСК)
+# Ночной режим
 SLEEP_HOUR_START = 1
 SLEEP_HOUR_END   = 12
 
@@ -138,6 +138,9 @@ pending_checks = {}
 schedule_windows = []
 schedule_updated_at = None
 
+# ✅ Отслеживание счёта для паузы после гола
+last_scores = {}   # {game_id: {"score": "2-1", "changed_at": timestamp}}
+
 # =====================================================================
 # АКТИВНОЕ ВРЕМЯ
 # =====================================================================
@@ -148,10 +151,9 @@ def is_active_time():
     return True
 
 # =====================================================================
-# API 1XBET — LIVE FEED (ВСЕ МАТЧИ ОДНИМ ЗАПРОСОМ)
+# API 1XBET — LIVE FEED
 # =====================================================================
 def get_live_games():
-    """Тянет все live-матчи со статистикой одним запросом."""
     url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
     params = {
         "cfView": 3,
@@ -195,7 +197,7 @@ def parse_stats(game):
                     stats[name] = item
     return stats
 
-def analyze_game(game):
+def analyze_game(game, now_ts):
     if not isinstance(game, dict):
         return None
 
@@ -214,7 +216,6 @@ def analyze_game(game):
     status_line = scores.get("statusLineStr", "")
     current_period = scores.get("currentPeriodName", "")
     if current_period == "Игра завершена" or status_line == "":
-        # Пустая statusLineStr = событие не идёт
         if not scores.get("timer", {}).get("timeRun"):
             return None
 
@@ -222,6 +223,24 @@ def analyze_game(game):
     timer = scores.get("timer") or {}
     time_sec = timer.get("timeSec", 0)
     minute = time_sec // 60
+
+    # Счёт
+    score = scores.get("fullScore", "0-0")
+
+    # ✅ ЕДИНСТВЕННЫЙ ФИКС: пауза после гола
+    gid = game.get("id")
+    prev = last_scores.get(gid, {})
+    if prev.get("score") and prev["score"] != score:
+        # Счёт изменился → обновляем время и пропускаем
+        last_scores[gid] = {"score": score, "changed_at": now_ts}
+        print(f"   ⚽ Гол! {score} — пауза {GOAL_COOLDOWN_SEC // 60} мин", flush=True)
+        return None
+    if prev.get("changed_at"):
+        elapsed = now_ts - prev["changed_at"]
+        if elapsed < GOAL_COOLDOWN_SEC:
+            mins = elapsed // 60
+            print(f"   ⏳ Гол был {mins} мин назад — ждём", flush=True)
+            return None
 
     # Статистика
     stats = parse_stats(game)
@@ -257,13 +276,10 @@ def analyze_game(game):
 
     o1 = (game.get("opponent1") or {}).get("fullName", "?")
     o2 = (game.get("opponent2") or {}).get("fullName", "?")
-    score = scores.get("fullScore", "0-0")
-
-    dominant = o1 if xg1 > xg2 else o2
     league_name = LEAGUE_IDS.get(liga_id, "")
 
     return {
-        "game_id":   game.get("id"),
+        "game_id":   gid,
         "team1":     o1,
         "team2":     o2,
         "match":     f"{o1} — {o2}",
@@ -275,7 +291,6 @@ def analyze_game(game):
         "xg_diff":   round(xg_diff, 2),
         "shots":     f"{shots1} — {shots2}",
         "attacks":   f"{att1} — {att2}",
-        "dominant":  dominant,
         "signal":    signal_type,
     }
 
@@ -562,6 +577,7 @@ def monitor():
         print("✅ Итого: 0 матчей (live-feed пустой)", flush=True)
         return
 
+    now_ts = int(time.time())
     total_our = 0
     total_signals = 0
 
@@ -576,43 +592,31 @@ def monitor():
         print(f"  📋 {LEAGUE_IDS[liga_id]}: {cnt} матчей", flush=True)
 
     for game in games:
-        result = analyze_game(game)
+        result = analyze_game(game, now_ts)
         if not result:
             continue
 
         total_our += 1
         gid = result["game_id"]
-        now = int(time.time())
 
-        # ✅ ФИКС 1: Проверка по pending_checks (переживает рестарт)
+        # Проверка по pending_checks
         if gid in pending_checks:
             prev_xg = pending_checks[gid].get("xg_diff", 0)
             if abs(prev_xg - result["xg_diff"]) < 0.5:
                 print(f"    ⏭️ Пропуск {result['match']} — уже есть в pending", flush=True)
                 continue
 
-        # ✅ ФИКС 2: Проверка по sent_signals (антиспам в памяти)
+        # Проверка по sent_signals
         prev = sent_signals.get(gid)
-        if prev and (now - prev["ts"]) < ANTISPAM_SEC:
+        if prev and (now_ts - prev["ts"]) < ANTISPAM_SEC:
             if abs(prev["xg_diff"] - result["xg_diff"]) < 0.3:
                 print(f"    ⏭️ Пропуск {result['match']} — антиспам", flush=True)
                 continue
 
-        # ✅ ФИКС 3: Проверка, не слали ли уже этот же сигнал недавно
-        # (если бот рестартовал — sent_signals пуст, но pending_checks остался)
-        already_sent = False
-        for gid_check, info in pending_checks.items():
-            if gid_check == gid:
-                already_sent = True
-                break
-        if already_sent:
-            print(f"    ⏭️ Пропуск {result['match']} — уже отправляли", flush=True)
-            continue
-
         text = format_signal(result)
         msg_id = send_telegram(text)
         if msg_id:
-            sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now}
+            sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now_ts}
             total_signals += 1
             print(f"    📤 {result['match']} | {result['signal']}", flush=True)
 
@@ -630,11 +634,11 @@ def monitor():
                 "old_s1":     s1,
                 "old_s2":     s2,
                 "minute":     result["minute"],
-                "signal_ts":  now,
+                "signal_ts":  now_ts,
                 "message_id": msg_id,
                 "base_text":  text,
-                "xg_diff":    result["xg_diff"],   # ✅ сохраняем xg для антиспама
-                "check_after": now + CHECK_FIRST_AFTER,
+                "xg_diff":    result["xg_diff"],
+                "check_after": now_ts + CHECK_FIRST_AFTER,
                 "attempts":   0,
             }
             time.sleep(1)
@@ -642,8 +646,7 @@ def monitor():
     print(f"✅ Итого: {total_our} наших матчей, {total_signals} сигналов, "
           f"на проверке: {len(pending_checks)}", flush=True)
 
-    now = int(time.time())
-    sent_signals = {k: v for k, v in sent_signals.items() if now - v["ts"] < 1800}
+    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v["ts"] < 1800}
 
 # =====================================================================
 # MAIN
@@ -653,6 +656,7 @@ def main():
     print(f"📋 Лиг: {len(LEAGUE_IDS)}", flush=True)
     print(f"🎯 Пороги: xG diff ≥ {MIN_XG_DIFF}, удары ≥ {MIN_SHOTS_DIFF}, "
           f"атаки ≥ {MIN_ATT_DIFF}, мин ≤ {MAX_MINUTE}", flush=True)
+    print(f"⏸️ Пауза после гола: {GOAL_COOLDOWN_SEC // 60} мин", flush=True)
     print(f"🔍 Проверка: через {CHECK_FIRST_AFTER//60} мин, "
           f"повтор каждые {CHECK_REPEAT_AFTER//60} мин, "
           f"макс {CHECK_MAX_ATTEMPTS} попыток", flush=True)
