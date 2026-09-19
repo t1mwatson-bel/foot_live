@@ -117,13 +117,13 @@ HEADERS = {
     "x-hd": "3li6mKmIg5PTz2GyMGs8vd22dQHcuhYMxRR+e2T8PWMKD8rRCXsQ9PZUzd0+DiICw+4UGuu6622DymSOgU8y/wm+8LUGmxhDyoQA7IBZzk026xR8NHvlW13dPxN01ZVT6ynO+oIZq7BtjToZcIPK6TSh+paC+hAayBLg/D3p82x7g5sbuQ9Nip3yB2Vak/p/fB5qVui4XFnebDkoFIMhSBA/ehM2g/B/GOfZQon1E2v1GdApeM39i74erqrqTrM9+/HYBUiqEXxrazx02w==",
     "x-requested-with": "XMLHttpRequest",
     "x-svc-source": "__BETTING_APP__",
-    "Cookie": "platform_type=desktop; auid=ua+l62qti/C6vzE7AxyDAg==; lng=ru; cookies_agree_type=3; tzo=3; is12h=0; fatman_uuid=6130f537-4410-1609-a97d-d8e42c9bd207; che_g=56f6092d-82cb-434a-aeac-681011664974; referral_values=%7B%22type%22%3A%22reflinkid%22%2C%22val%22%3A%22d_en3837289m_1599c;_%22%2C%22additionalq%22%3=A%7B%22name_tag%220%3A%22tag%22%7D%7D; reflinkid=d_3837289m_1599c_; SESSION=a0b5dfe7c481dc01770a3b152bf27652; sh.session.id=f6faa86a-0670-459e-8327-f11ca865b071; _ga=GA1.1.1249863541.1789758468; window_width=1091; _ga_7JGWL9SV66=GS2.1.s1789758468$o1$g1$t1789759197$j15$l0$h1289626781",
+    "Cookie": "platform_type=desktop; auid=ua+l62qti/C6vzE7AxyDAg==; lng=ru; cookies_agree_type=3; tzo=3; is12h=0; fatman_uuid=6130f537-4410-1609-a97d-d8e42c9bd207; che_g=56f6092d-82cb-434a-aeac-681011664974; referral_values=%7B%22type%22%3A%22reflinkid%22%2C%22val%22%3A%22d_3837289m_1599c_%22%2C%22additional%22%3A%7B%22name_tag%22%3A%22tag%22%7D%7D; reflinkid=d_3837289m_1599c_; SESSION=a0b5dfe7c481dc01770a3b152bf27652; sh.session.id=f6faa86a-0670-459e-8327-f11ca865b071; _ga=GA1.1.1249863541.1789758468; window_width=1091; _ga_7JGWL9SV66=GS2.1.s1789758468$o1$g1$t1789759197$j15$l0$h1289626781",
 }
 
 RUSCORE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36",
     "Accept": "*/*",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,.7",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     "Origin": "https://ruscore.ru",
     "Referer": "https://ruscore.ru/",
     "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "YaBrowser";v="26.8", "Yowser";v="2.5"',
@@ -664,4 +664,233 @@ def check_pending_results():
                 info["attempts"] = info.get("attempts", 0) + 1
                 info["check_after"] = now + CHECK_REPEAT_AFTER
                 if info["attempts"] >= CHECK_MAX_ATTEMPTS:
-                    edit_telegram(info["message_id
+                    edit_telegram(info["message_id"],
+                                  format_with_result(info["base_text"],
+                                                     "❓ <b>РЕЗУЛЬТАТ НЕ НАЙДЕН</b>"))
+                    del pending_checks[gid]
+                continue
+
+            h_score, a_score = parse_score_from_ruscore(ev)
+            status = (ev.get("status") or {}).get("label", "")
+
+            if h_score is None:
+                info["check_after"] = now + CHECK_REPEAT_AFTER
+                continue
+
+            goal = (h_score != info["old_s1"]) or (a_score != info["old_s2"])
+            finished = status in ("finished", "ended")
+
+            if goal:
+                elapsed = (now - info["signal_ts"]) // 60
+                line = (f"✅ <b>ЗАШЛО</b>\n"
+                        f"📊 Было: {info['old_s1']}-{info['old_s2']} ({info['minute']}')\n"
+                        f"📊 Стало: {h_score}-{a_score}\n"
+                        f"⏱ ~{elapsed} мин")
+                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                print(f"✅ {info['match']}", flush=True)
+                del pending_checks[gid]
+                continue
+
+            if finished:
+                line = (f"❌ <b>НЕ ЗАШЛО</b>\n📊 Итог: {h_score}-{a_score}")
+                edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                print(f"❌ {info['match']}", flush=True)
+                del pending_checks[gid]
+                continue
+
+            info["attempts"] = info.get("attempts", 0) + 1
+            info["check_after"] = now + CHECK_REPEAT_AFTER
+            if info["attempts"] >= CHECK_MAX_ATTEMPTS:
+                edit_telegram(info["message_id"],
+                              format_with_result(info["base_text"],
+                                                 f"⏱ <b>БЕЗ РЕЗУЛЬТАТА</b> ({h_score}-{a_score})"))
+                del pending_checks[gid]
+
+# =====================================================================
+# РАСПИСАНИЕ
+# =====================================================================
+def is_our_league(name):
+    if not name:
+        return False
+    low = name.lower()
+    return any(p in low for p in RUSCORE_LEAGUES_FILTER)
+
+def get_today_schedule():
+    today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+    events = fetch_ruscore_events(today)
+    schedule = []
+    for ev in events:
+        if not is_our_league(ev.get("_league", "")):
+            continue
+        t = ev.get("time")
+        if not t:
+            continue
+        try:
+            dt = datetime.fromisoformat(t)
+            dt = dt.astimezone(MOSCOW_TZ) if dt.tzinfo else MOSCOW_TZ.localize(dt)
+            schedule.append({"time": dt})
+        except (ValueError, TypeError):
+            continue
+    return schedule
+
+def get_windows(schedule):
+    if not schedule:
+        return []
+    times = sorted([s["time"] for s in schedule])
+    windows = [(t, t + timedelta(hours=2)) for t in times]
+    merged = [windows[0]]
+    for start, end in windows[1:]:
+        ls, le = merged[-1]
+        if start <= le:
+            merged[-1] = (ls, max(le, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+def refresh_schedule_if_needed():
+    global schedule_windows, schedule_updated_at
+    now = datetime.now(MOSCOW_TZ)
+    if schedule_updated_at and (now - schedule_updated_at).total_seconds() < SCHEDULE_REFRESH_SEC:
+        return
+    print("📅 Обновляем расписание...", flush=True)
+    schedule_windows = get_windows(get_today_schedule())
+    schedule_updated_at = now
+    if schedule_windows:
+        for s, e in schedule_windows:
+            print(f"   {s.strftime('%H:%M')} – {e.strftime('%H:%M')}", flush=True)
+
+def is_match_time():
+    if not schedule_windows:
+        return False
+    now = datetime.now(MOSCOW_TZ)
+    return any(s <= now <= e for s, e in schedule_windows)
+
+# =====================================================================
+# ОСНОВНОЙ ЦИКЛ
+# =====================================================================
+def monitor():
+    global sent_signals
+    print(f"🔄 {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}", flush=True)
+
+    games = get_live_games()
+    if not games:
+        print("   0 матчей", flush=True)
+        return
+
+    now_ts = int(time.time())
+    total_our = 0
+    total_signals = 0
+    total_drops = 0
+
+    by_league = {}
+    for game in games:
+        lid = (game.get("liga") or {}).get("id")
+        if lid in LEAGUE_IDS:
+            by_league[lid] = by_league.get(lid, 0) + 1
+    for lid, cnt in by_league.items():
+        print(f"  📋 {LEAGUE_IDS[lid]}: {cnt}", flush=True)
+
+    for game in games:
+        result = analyze_game(game, now_ts)
+        if not result:
+            continue
+        total_our += 1
+        gid = result["game_id"]
+
+        # ДРОП КЭФА — независимый сигнал
+        drops = check_odds_drop(gid, now_ts)
+        if drops:
+            drop_text = format_drop_signal(
+                result['league'], result['match'],
+                result['score'], result['minute'], drops
+            )
+            if send_telegram(drop_text):
+                total_drops += 1
+                print(f"    📉 ДРОП {result['match']} | "
+                      f"{drops[0]['label']} {drops[0]['change_pct']}%", flush=True)
+                time.sleep(1)
+
+        # Основной xG-сигнал
+        if gid in pending_checks:
+            if abs(pending_checks[gid].get("xg_diff", 0) - result["xg_diff"]) < 0.5:
+                continue
+
+        prev = sent_signals.get(gid)
+        if prev and (now_ts - prev["ts"]) < ANTISPAM_SEC:
+            if abs(prev["xg_diff"] - result["xg_diff"]) < 0.4:
+                continue
+
+        text = format_signal(result)
+        msg_id = send_telegram(text)
+        if msg_id:
+            sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now_ts}
+            total_signals += 1
+            print(f"    📤 {result['match']} | {result['signal']} | "
+                  f"кэф {result['odd_tb']}", flush=True)
+
+            today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+            try:
+                s1, s2 = map(int, result["score"].split("-"))
+            except ValueError:
+                s1, s2 = 0, 0
+
+            pending_checks[gid] = {
+                "team1": result["team1"], "team2": result["team2"],
+                "match": result["match"], "date_str": today,
+                "old_s1": s1, "old_s2": s2, "minute": result["minute"],
+                "signal_ts": now_ts, "message_id": msg_id, "base_text": text,
+                "xg_diff": result["xg_diff"],
+                "check_after": now_ts + CHECK_FIRST_AFTER, "attempts": 0,
+            }
+            time.sleep(1)
+
+    print(f"✅ {total_our} наших, {total_signals} сигналов, "
+          f"{total_drops} дропов, pending: {len(pending_checks)}", flush=True)
+
+    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v["ts"] < 1800}
+
+# =====================================================================
+# MAIN
+# =====================================================================
+def main():
+    print("🚀 БОТ ЗАПУЩЕН", flush=True)
+    print(f"📋 Лиг: {len(LEAGUE_IDS)}", flush=True)
+    print(f"🔥 A: xG≥{A_XG_DIFF}, shots≥{A_SHOTS_ALL}, att≥{A_ATT_DIFF}, "
+          f"corners≥{A_CORNERS_DIFF}, кэф≥{A_MIN_ODD}", flush=True)
+    print(f"🟢 B: xG≥{B_XG_DIFF}, shots≥{B_SHOTS_ALL}, att≥{B_ATT_DIFF}, "
+          f"corners≥{B_CORNERS_DIFF}, кэф≥{B_MIN_ODD}", flush=True)
+    print(f"📉 Дроп: ≥{abs(ODDS_DROP_PCT)}% за {ODDS_DROP_WINDOW_SEC}с", flush=True)
+    print(f"⏸️ Пауза после гола: {GOAL_COOLDOWN_SEC // 60} мин", flush=True)
+    print(f"🚫 Ничья (кроме 0:0) — пропуск", flush=True)
+    print("=" * 60, flush=True)
+
+    while True:
+        try:
+            now_str = datetime.now(MOSCOW_TZ).strftime('%H:%M')
+            if not is_active_time():
+                print(f"😴 Ночь ({now_str})", flush=True)
+                time.sleep(600)
+                continue
+
+            refresh_schedule_if_needed()
+
+            if is_match_time():
+                monitor()
+                check_pending_results()
+                time.sleep(UPDATE_INTERVAL)
+            else:
+                print(f"💤 Матчей нет ({now_str})", flush=True)
+                check_pending_results()
+                time.sleep(600)
+
+        except KeyboardInterrupt:
+            print("⏹️", flush=True)
+            break
+        except Exception as e:
+            print(f"❌ {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            time.sleep(30)
+
+if __name__ == "__main__":
+    main()
