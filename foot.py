@@ -308,8 +308,6 @@ def edit_telegram(message_id, text):
 
 def format_signal(s):
     return (
-        def format_signal(s):
-    return (
         f"{s['signal']}\n"
         f"{s['league']}\n"
         f"⚽ <b>{s['match']}</b>\n"
