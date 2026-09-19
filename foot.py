@@ -308,6 +308,8 @@ def edit_telegram(message_id, text):
 
 def format_signal(s):
     return (
+        def format_signal(s):
+    return (
         f"{s['signal']}\n"
         f"{s['league']}\n"
         f"⚽ <b>{s['match']}</b>\n"
@@ -315,7 +317,7 @@ def format_signal(s):
         f"🎯 xG: {s['xg']}  (разница {s['xg_diff']})\n"
         f"🥅 Удары в створ: {s['shots']}\n"
         f"⚔️ Опасные атаки: {s['attacks']}\n"
-        f"👉 Доминирует: <b>{s['dominant']}</b>"
+        f"💡 <b>Ожидается гол — ТБ 0.5 / ТБ 1.5</b>"
     )
 
 def format_with_result(base_text, result_line):
