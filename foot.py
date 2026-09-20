@@ -242,7 +242,7 @@ def check_drop(gid, now_ts):
         return None
     cur = odds_history[gid][-1]
     prev = None
-    for h in reversed(odds_history[gid][:-1]):
+    for h in reversed(list(odds_history[gid])[:-1]):
         if now_ts - h["ts"] >= S4_DROP_WINDOW:
             prev = h
             break
