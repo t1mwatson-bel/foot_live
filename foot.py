@@ -716,37 +716,105 @@ def is_match_time():
 # ОТПРАВКА СИГНАЛА СТРАТЕГИИ
 # =====================================================================
 def try_send_signal(p, strategy, now_ts):
+    """
+    Первый сигнал по матчу — отправляем.
+    Следующий по тому же матчу — редактируем, добавляем стратегию.
+    """
     gid = p["game_id"]
-    key = f"{gid}_{strategy['strategy']}"
-
-    prev = sent_signals.get(key)
-    if prev and (now_ts - prev) < ANTISPAM_SEC:
-        return False
+    key = str(gid)
 
     odd = get_odd_total(p_game_cache.get(gid, {}), p["s1"] + p["s2"])
+
     if odd is not None and odd < strategy["min_odd"]:
         print(f"    💸 Пропуск {p['match']} [{strategy['strategy']}] — кэф {odd}", flush=True)
         return False
 
-    text = format_signal(p, strategy, odd)
-    msg_id = send_telegram(text)
-    if not msg_id:
+    existing = sent_signals.get(key)
+
+    # ===== ПЕРВЫЙ СИГНАЛ ПО МАТЧУ =====
+    if not existing:
+        text = format_signal(p, strategy, odd)
+        msg_id = send_telegram(text)
+        if not msg_id:
+            return False
+
+        sent_signals[key] = {
+            "ts": now_ts,
+            "message_id": msg_id,
+            "base_text": text,
+            "strategies": [f"{strategy['emoji']} {strategy['strategy']}"],
+            "last_p": p,
+        }
+        print(f"    📤 {p['match']} | {strategy['emoji']} {strategy['strategy']} | кэф {odd}", flush=True)
+
+        today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+        pending_checks[key] = {
+            "team1": p["team1"], "team2": p["team2"],
+            "match": p["match"], "date_str": today,
+            "old_s1": p["s1"], "old_s2": p["s2"],
+            "minute": p["minute"], "signal_ts": now_ts,
+            "message_id": msg_id, "base_text": text,
+            "strategy": strategy["strategy"],
+            "check_after": now_ts + CHECK_FIRST_AFTER,
+            "attempts": 0,
+        }
+        time.sleep(1)
+        return True
+
+    # ===== МАТЧ УЖЕ В СИГНАЛАХ =====
+    full_name = f"{strategy['emoji']} {strategy['strategy']}"
+
+    if full_name in existing["strategies"]:
         return False
 
-    sent_signals[key] = now_ts
-    print(f"    📤 {p['match']} | {strategy['emoji']} {strategy['strategy']} | кэф {odd}", flush=True)
+    if (now_ts - existing["ts"]) > ANTISPAM_SEC:
+        del sent_signals[key]
+        return try_send_signal(p, strategy, now_ts)
 
-    today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
-    pending_checks[key] = {
-        "team1": p["team1"], "team2": p["team2"],
-        "match": p["match"], "date_str": today,
-        "old_s1": p["s1"], "old_s2": p["s2"],
-        "minute": p["minute"], "signal_ts": now_ts,
-        "message_id": msg_id, "base_text": text,
-        "strategy": strategy["strategy"],
-        "check_after": now_ts + CHECK_FIRST_AFTER,
-        "attempts": 0,
-    }
+    # ===== ДОБАВЛЯЕМ СТРАТЕГИЮ В СУЩЕСТВУЮЩЕЕ СООБЩЕНИЕ =====
+    existing["strategies"].append(full_name)
+    existing["ts"] = now_ts
+    existing["last_p"] = p
+
+    new_text = format_signal_multi(p, existing["strategies"], odd)
+    edit_telegram(existing["message_id"], new_text)
+    existing["base_text"] = new_text
+
+    if key in pending_checks:
+        pending_checks[key]["base_text"] = new_text
+
+    print(f"    ✏️ {p['match']} | + {full_name} "
+          f"(всего: {len(existing['strategies'])})", flush=True)
+    time.sleep(1)
+    return True
+
+    # ===== МАТЧ УЖЕ В СИГНАЛАХ =====
+    full_name = f"{strategy['emoji']} {strategy['strategy']}"
+
+    # Эта стратегия уже подтвердила — пропуск
+    if full_name in existing["strategies"]:
+        return False
+
+    # Прошло много времени — старый удаляем, новый отправляем
+    if (now_ts - existing["ts"]) > ANTISPAM_SEC:
+        del sent_signals[key]
+        return try_send_signal(p, strategy, now_ts)
+
+    # ===== ДОБАВЛЯЕМ СТРАТЕГИЮ В СУЩЕСТВУЮЩЕЕ СООБЩЕНИЕ =====
+    existing["strategies"].append(full_name)
+    existing["ts"] = now_ts
+    existing["last_p"] = p
+
+    new_text = format_signal_multi(p, existing["strategies"], odd)
+    edit_telegram(existing["message_id"], new_text)
+    existing["base_text"] = new_text
+
+    # Обновляем pending (свежие данные)
+    if key in pending_checks:
+        pending_checks[key]["base_text"] = new_text
+
+    print(f"    ✏️ {p['match']} | + {full_name} "
+          f"(всего: {len(existing['strategies'])})", flush=True)
     time.sleep(1)
     return True
 
