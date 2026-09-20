@@ -42,33 +42,29 @@ LEAGUE_IDS = {
 # =====================================================================
 # ПОРОГИ СТРАТЕГИЙ
 # =====================================================================
-# Стратегия 1: xG-мощь
 S1_XG_DIFF       = 1.3
 S1_SHOTS_ON_DIFF = 3
 S1_MIN_ODD       = 1.4
 
-# Стратегия 2: Удары
 S2_SHOTS_DIFF    = 8
 S2_SHOTS_ON_DIFF = 3
 S2_MIN_ODD       = 1.4
 
-# Стратегия 3: Углы + атаки
 S3_CORNERS_DIFF  = 4
 S3_ATT_DIFF      = 20
 S3_MIN_ODD       = 1.4
 
-# Стратегия 4: Дроп кэфа
-S4_DROP_PCT      = -10.0
-S4_DROP_WINDOW   = 180
-
-# Стратегия 5: Опасные атаки
 S5_ATT_DIFF      = 30
 S5_MIN_ODD       = 1.4
 
-# Стратегия 6: Комбо (xG + углы)
 S6_XG_DIFF       = 1.0
 S6_CORNERS_DIFF  = 3
 S6_MIN_ODD       = 1.4
+
+# Дроп 1X2
+DROP_PCT      = -10.0
+DROP_WINDOW   = 180
+DROP_ANTISPAM = 900
 
 # Общие
 MAX_MINUTE        = 80
@@ -80,7 +76,6 @@ SLEEP_HOUR_START = 1
 SLEEP_HOUR_END   = 12
 SCHEDULE_REFRESH_SEC = 3600
 
-# Ruscore
 RUSCORE_URL = "https://api-statistics.ruscore.ru/v1/events"
 RUSCORE_PARAMS = {
     "app_id": "ruscore",
@@ -93,7 +88,6 @@ RUSCORE_LEAGUES_FILTER = [
     "россии", "рпл", "лига чемпионов", "лига европы", "лига конференций",
 ]
 
-# Проверка результата
 CHECK_FIRST_AFTER  = 1800
 CHECK_REPEAT_AFTER = 1800
 CHECK_MAX_ATTEMPTS = 4
@@ -145,7 +139,8 @@ print("✅ Настройки загружены", flush=True)
 sent_signals = {}
 pending_checks = {}
 last_scores = {}
-odds_history = {}
+odds_history = {}        # {gid: deque([{ts, odds}, ...])}
+sent_drops = {}          # {gid: ts}
 schedule_windows = []
 schedule_updated_at = None
 
@@ -157,7 +152,7 @@ def is_active_time():
     return not (SLEEP_HOUR_START <= h < SLEEP_HOUR_END)
 
 # =====================================================================
-# API — LIVE FEED
+# API
 # =====================================================================
 def get_live_games():
     url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
@@ -197,9 +192,29 @@ def sv(stats, name, side="s1"):
         return 0.0
 
 # =====================================================================
-# ПАРСИНГ КЭФОВ
+# ПАРСИНГ КЭФОВ 1X2 (только для дропа)
 # =====================================================================
+def get_1x2_odds(game):
+    """Только 1X2: П1, X, П2."""
+    odds = {}
+    for grp in (game.get("eventGroups") or []):
+        if grp.get("groupId") != 1:
+            continue
+        for e in (grp.get("events") or []):
+            if not isinstance(e, list) or not e:
+                continue
+            item = e[0]
+            if not isinstance(item, dict):
+                continue
+            t, c = item.get("T"), item.get("C")
+            if t == 1:   odds["П1"] = c
+            elif t == 2: odds["X"] = c
+            elif t == 3: odds["П2"] = c
+        break
+    return odds
+
 def get_odd_total(game, total_goals):
+    """Кэф на ТБ (total+0.5) — для value-фильтра стратегий."""
     target = total_goals + 0.5
     for grp in (game.get("centralBlockEventGroups") or []):
         if grp.get("groupId") != 17:
@@ -214,51 +229,88 @@ def get_odd_total(game, total_goals):
                 return item.get("cf")
     return None
 
-def get_1x2_odds(game):
-    p1 = x = p2 = None
-    for grp in (game.get("eventGroups") or []):
-        if grp.get("groupId") != 1:
-            continue
-        for e in (grp.get("events") or []):
-            if not isinstance(e, list) or not e:
-                continue
-            item = e[0]
-            if not isinstance(item, dict):
-                continue
-            t, c = item.get("T"), item.get("C")
-            if t == 1:   p1 = c
-            elif t == 2: x = c
-            elif t == 3: p2 = c
-        break
-    return p1, x, p2
-
-def save_odds(gid, now_ts, tb, p1, x, p2):
+# =====================================================================
+# ДРОП 1X2
+# =====================================================================
+def save_odds(gid, now_ts, odds):
     if gid not in odds_history:
         odds_history[gid] = deque(maxlen=30)
-    odds_history[gid].append({"ts": now_ts, "tb": tb, "p1": p1, "x": x, "p2": p2})
+    odds_history[gid].append({"ts": now_ts, "odds": odds})
 
-def check_drop(gid, now_ts):
+def check_drops(gid, now_ts):
+    """Проверяет дроп П1/X/П2."""
     if gid not in odds_history or len(odds_history[gid]) < 2:
         return None
-    cur = odds_history[gid][-1]
+
+    cur = odds_history[gid][-1]["odds"]
+
     prev = None
     for h in reversed(list(odds_history[gid])[:-1]):
-        if now_ts - h["ts"] >= S4_DROP_WINDOW:
+        if now_ts - h["ts"] >= DROP_WINDOW:
             prev = h
             break
+
     if prev is None:
         return None
+
+    prev_odds = prev["odds"]
     res = []
-    for key, label in [("tb", "ТБ"), ("p1", "П1"), ("x", "X"), ("p2", "П2")]:
-        c, p = cur.get(key), prev.get(key)
+
+    for key in ("П1", "X", "П2"):
+        c = cur.get(key)
+        p = prev_odds.get(key)
         if not c or not p:
             continue
-        change = (c - p) / p * 100
-        if change <= S4_DROP_PCT:
-            res.append({"label": label, "from": p, "to": c,
-                        "change_pct": round(change, 1),
-                        "window": now_ts - prev["ts"]})
-    return res if res else None
+        try:
+            change = (float(c) - float(p)) / float(p) * 100
+        except (ValueError, TypeError, ZeroDivisionError):
+            continue
+        if change <= DROP_PCT:
+            res.append({
+                "market": key,
+                "from": p,
+                "to": c,
+                "change_pct": round(change, 1),
+                "window": now_ts - prev["ts"],
+            })
+
+    if not res:
+        return None
+    res.sort(key=lambda x: x["change_pct"])
+    return res
+
+def drop_to_bet(market, p):
+    """П1/X/П2 → конкретная ставка."""
+    if market == "П1":
+        return ("ИТ1 Б 0.5 (хозяева забьют)",
+                "Дроп П1 → хозяева побеждают → забьют")
+    if market == "П2":
+        return ("ИТ2 Б 0.5 (гости забьют)",
+                "Дроп П2 → гости побеждают → забьют")
+    if market == "X":
+        return ("Обе забьют (ОЗ)",
+                "Дроп X → ждут ничью → часто обе забивают")
+    return (market, "—")
+
+def format_drop_signal(p, drops):
+    lines = [
+        "📉 <b>ДРОП 1X2</b>",
+        p["league"],
+        f"⚽ <b>{p['match']}</b>",
+        f"📊 Счёт: <b>{p['score']}</b> | ⏱ {p['minute']}'",
+        "",
+    ]
+    for d in drops[:3]:
+        lines.append(f"🔻 <b>{d['market']}</b>: {d['from']} → {d['to']} "
+                     f"({d['change_pct']}% за {d['window']}с)")
+
+    best = drops[0]
+    bet, reason = drop_to_bet(best["market"], p)
+    lines.append("")
+    lines.append(f"💡 <b>Ставка: {bet}</b>")
+    lines.append(f"<i>{reason}</i>")
+    lines.append(f"📌 Кэф 1X2 сейчас: {best['to']}")
+    return "\n".join(lines)
 
 # =====================================================================
 # TELEGRAM
@@ -375,142 +427,81 @@ def common_ok(p, gid, now_ts):
     return True
 
 # =====================================================================
-# СТРАТЕГИЯ 1: xG-МОЩЬ
+# СТРАТЕГИИ
 # =====================================================================
 def strategy_xg(p):
     xg_diff = abs(p["xg1"] - p["xg2"])
     shots_on_diff = abs(p["shots_on1"] - p["shots_on2"])
-
-    if xg_diff < S1_XG_DIFF:
+    if xg_diff < S1_XG_DIFF or shots_on_diff < S1_SHOTS_ON_DIFF:
         return None
-    if shots_on_diff < S1_SHOTS_ON_DIFF:
-        return None
-
     side = "home" if p["xg1"] > p["xg2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
     if red_side > 0:
         return None
-
     dominant = p["team1"] if side == "home" else p["team2"]
+    return {"strategy": "xG-мощь", "emoji": "🟢", "dominant": dominant,
+            "key": f"xG {xg_diff:.2f}, удары в створ {shots_on_diff}",
+            "min_odd": S1_MIN_ODD}
 
-    return {
-        "strategy": "xG-мощь",
-        "emoji": "🟢",
-        "dominant": dominant,
-        "key": f"xG diff {xg_diff:.2f}, удары в створ diff {shots_on_diff}",
-        "min_odd": S1_MIN_ODD,
-    }
-
-# =====================================================================
-# СТРАТЕГИЯ 2: УДАРЫ
-# =====================================================================
 def strategy_shots(p):
     shots_diff = abs(p["shots_all1"] - p["shots_all2"])
     shots_on_diff = abs(p["shots_on1"] - p["shots_on2"])
-
-    if shots_diff < S2_SHOTS_DIFF:
+    if shots_diff < S2_SHOTS_DIFF or shots_on_diff < S2_SHOTS_ON_DIFF:
         return None
-    if shots_on_diff < S2_SHOTS_ON_DIFF:
-        return None
-
     side = "home" if p["shots_all1"] > p["shots_all2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
     if red_side > 0:
         return None
-
     dominant = p["team1"] if side == "home" else p["team2"]
+    return {"strategy": "Удары", "emoji": "🥅", "dominant": dominant,
+            "key": f"удары {shots_diff}, в створ {shots_on_diff}",
+            "min_odd": S2_MIN_ODD}
 
-    return {
-        "strategy": "Удары",
-        "emoji": "🥅",
-        "dominant": dominant,
-        "key": f"удары всего {shots_diff}, в створ {shots_on_diff}",
-        "min_odd": S2_MIN_ODD,
-    }
-
-# =====================================================================
-# СТРАТЕГИЯ 3: УГЛЫ + АТАКИ
-# =====================================================================
 def strategy_corners(p):
     corners_diff = abs(p["corners1"] - p["corners2"])
     att_diff = abs(p["att1"] - p["att2"])
-
-    if corners_diff < S3_CORNERS_DIFF:
+    if corners_diff < S3_CORNERS_DIFF or att_diff < S3_ATT_DIFF:
         return None
-    if att_diff < S3_ATT_DIFF:
-        return None
-
     side = "home" if p["corners1"] > p["corners2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
     if red_side > 0:
         return None
-
     dominant = p["team1"] if side == "home" else p["team2"]
+    return {"strategy": "Углы + атаки", "emoji": "🚩", "dominant": dominant,
+            "key": f"углы {corners_diff}, атаки {att_diff}",
+            "min_odd": S3_MIN_ODD}
 
-    return {
-        "strategy": "Углы + атаки",
-        "emoji": "🚩",
-        "dominant": dominant,
-        "key": f"углы {corners_diff}, атаки {att_diff}",
-        "min_odd": S3_MIN_ODD,
-    }
-
-# =====================================================================
-# СТРАТЕГИЯ 5: ОПАСНЫЕ АТАКИ
-# =====================================================================
 def strategy_attacks(p):
     att_diff = abs(p["att1"] - p["att2"])
     if att_diff < S5_ATT_DIFF:
         return None
-
     side = "home" if p["att1"] > p["att2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
     if red_side > 0:
         return None
-
     dominant = p["team1"] if side == "home" else p["team2"]
+    return {"strategy": "Опасные атаки", "emoji": "⚔️", "dominant": dominant,
+            "key": f"атаки {att_diff}", "min_odd": S5_MIN_ODD}
 
-    return {
-        "strategy": "Опасные атаки",
-        "emoji": "⚔️",
-        "dominant": dominant,
-        "key": f"атаки diff {att_diff}",
-        "min_odd": S5_MIN_ODD,
-    }
-
-# =====================================================================
-# СТРАТЕГИЯ 6: КОМБО (xG + углы)
-# =====================================================================
 def strategy_combo(p):
     xg_diff = abs(p["xg1"] - p["xg2"])
     corners_diff = abs(p["corners1"] - p["corners2"])
-
-    if xg_diff < S6_XG_DIFF:
+    if xg_diff < S6_XG_DIFF or corners_diff < S6_CORNERS_DIFF:
         return None
-    if corners_diff < S6_CORNERS_DIFF:
-        return None
-
     side = "home" if p["xg1"] > p["xg2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
     if red_side > 0:
         return None
-
     dominant = p["team1"] if side == "home" else p["team2"]
-
-    return {
-        "strategy": "Комбо xG+углы",
-        "emoji": "💡",
-        "dominant": dominant,
-        "key": f"xG {xg_diff:.2f}, углы {corners_diff}",
-        "min_odd": S6_MIN_ODD,
-    }
+    return {"strategy": "Комбо xG+углы", "emoji": "💡", "dominant": dominant,
+            "key": f"xG {xg_diff:.2f}, углы {corners_diff}",
+            "min_odd": S6_MIN_ODD}
 
 # =====================================================================
-# ФОРМАТ СООБЩЕНИЙ
+# ФОРМАТ СИГНАЛА СТРАТЕГИЙ
 # =====================================================================
 def format_signal(p, strategy, odd):
     side = "home" if strategy["dominant"] == p["team1"] else "away"
-
     xg_dom = p["xg1"] if side == "home" else p["xg2"]
     xg_opp = p["xg2"] if side == "home" else p["xg1"]
     so_dom = p["shots_on1"] if side == "home" else p["shots_on2"]
@@ -525,7 +516,6 @@ def format_signal(p, strategy, odd):
     total = p["s1"] + p["s2"]
     tb1 = total + 0.5
     tb2 = total + 1.5
-
     odd_str = f"💰 Кэф ТБ {tb1}: <b>{odd}</b>" if odd else "💰 Кэф: —"
 
     return (
@@ -542,20 +532,6 @@ def format_signal(p, strategy, odd):
         f"{odd_str}\n"
         f"💡 <b>Ожидается гол — ТБ {tb1} / ТБ {tb2}</b>"
     )
-
-def format_drop_signal(p, drops):
-    lines = [
-        f"📉 <b>СИГНАЛ: Дроп кэфа</b>",
-        p["league"],
-        f"⚽ <b>{p['match']}</b>",
-        f"📊 Счёт: <b>{p['score']}</b> | ⏱ {p['minute']}'",
-        "",
-    ]
-    for d in drops:
-        lines.append(f"• {d['label']}: {d['from']} → {d['to']} "
-                     f"({d['change_pct']}% за {d['window']}с)")
-    lines.append("💡 Умные деньги идут на событие")
-    return "\n".join(lines)
 
 # =====================================================================
 # RUSCORE
@@ -737,27 +713,19 @@ def is_match_time():
     return any(s <= now <= e for s, e in schedule_windows)
 
 # =====================================================================
-# ОТПРАВКА СИГНАЛА (единая точка)
+# ОТПРАВКА СИГНАЛА СТРАТЕГИИ
 # =====================================================================
 def try_send_signal(p, strategy, now_ts):
-    """
-    Отправляет сигнал, если не антиспам.
-    Возвращает True если отправили.
-    """
     gid = p["game_id"]
     key = f"{gid}_{strategy['strategy']}"
 
-    # Антиспам
     prev = sent_signals.get(key)
     if prev and (now_ts - prev) < ANTISPAM_SEC:
         return False
 
-    # Кэф для value-фильтра
     odd = get_odd_total(p_game_cache.get(gid, {}), p["s1"] + p["s2"])
-
-    # Value-фильтр
     if odd is not None and odd < strategy["min_odd"]:
-        print(f"    💸 Пропуск {p['match']} [{strategy['strategy']}] — кэф {odd} < {strategy['min_odd']}", flush=True)
+        print(f"    💸 Пропуск {p['match']} [{strategy['strategy']}] — кэф {odd}", flush=True)
         return False
 
     text = format_signal(p, strategy, odd)
@@ -768,7 +736,6 @@ def try_send_signal(p, strategy, now_ts):
     sent_signals[key] = now_ts
     print(f"    📤 {p['match']} | {strategy['emoji']} {strategy['strategy']} | кэф {odd}", flush=True)
 
-    # Добавляем в pending для проверки результата
     today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
     pending_checks[key] = {
         "team1": p["team1"], "team2": p["team2"],
@@ -783,16 +750,13 @@ def try_send_signal(p, strategy, now_ts):
     time.sleep(1)
     return True
 
-# =====================================================================
-# КЭШ ДЛЯ VALUE-ФИЛЬТРА
-# =====================================================================
 p_game_cache = {}
 
 # =====================================================================
 # ОСНОВНОЙ ЦИКЛ
 # =====================================================================
 def monitor():
-    global sent_signals, p_game_cache
+    global sent_signals, sent_drops, p_game_cache
 
     print(f"🔄 {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}", flush=True)
 
@@ -823,31 +787,33 @@ def monitor():
 
         gid = p["game_id"]
 
-        # Сохраняем кэфы
-        odd_tb = get_odd_total(game, p["s1"] + p["s2"])
-        odd_p1, odd_x, odd_p2 = get_1x2_odds(game)
-        save_odds(gid, now_ts, odd_tb, odd_p1, odd_x, odd_p2)
+        # =============================================================
+        # ДРОП 1X2 — отдельный модуль (работает ВСЕГДА, независимо)
+        # =============================================================
+        odds_1x2 = get_1x2_odds(game)
+        if odds_1x2:
+            save_odds(gid, now_ts, odds_1x2)
 
-        # СТРАТЕГИЯ 4: ДРОП КЭФА (независимая, до common_ok)
-        drops = check_drop(gid, now_ts)
-        if drops:
-            drop_text = format_drop_signal(p, drops)
-            drop_key = f"{gid}_DROP"
-            prev_drop = sent_signals.get(drop_key)
-            if not (prev_drop and (now_ts - prev_drop) < ANTISPAM_SEC):
-                if send_telegram(drop_text):
-                    sent_signals[drop_key] = now_ts
-                    total_drops += 1
-                    print(f"    📉 ДРОП {p['match']} | {drops[0]['label']} {drops[0]['change_pct']}%", flush=True)
-                    time.sleep(1)
+            drops = check_drops(gid, now_ts)
+            if drops:
+                prev_drop = sent_drops.get(gid)
+                if not (prev_drop and (now_ts - prev_drop) < DROP_ANTISPAM):
+                    drop_text = format_drop_signal(p, drops)
+                    if send_telegram(drop_text):
+                        sent_drops[gid] = now_ts
+                        total_drops += 1
+                        print(f"    📉 ДРОП {p['match']} | "
+                              f"{drops[0]['market']} {drops[0]['change_pct']}%", flush=True)
+                        time.sleep(1)
 
-        # Общие фильтры для стратегий 1-3,5,6
+        # =============================================================
+        # СТРАТЕГИИ xG и др. (работают как раньше)
+        # =============================================================
         if not common_ok(p, gid, now_ts):
             continue
 
         total_our += 1
 
-        # Проверяем все стратегии
         for strategy_func in (strategy_xg, strategy_shots, strategy_corners,
                               strategy_attacks, strategy_combo):
             strat = strategy_func(p)
@@ -855,13 +821,13 @@ def monitor():
                 continue
             if try_send_signal(p, strat, now_ts):
                 total_signals += 1
-                break  # одна стратегия сработала — хватит
+                break
 
     print(f"✅ {total_our} наших, {total_signals} сигналов, "
           f"{total_drops} дропов, pending: {len(pending_checks)}", flush=True)
 
-    # Чистим старое
     sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v < 3600}
+    sent_drops = {k: v for k, v in sent_drops.items() if now_ts - v < 3600}
 
 # =====================================================================
 # MAIN
@@ -869,7 +835,8 @@ def monitor():
 def main():
     print("🚀 БОТ ЗАПУЩЕН", flush=True)
     print(f"📋 Лиг: {len(LEAGUE_IDS)}", flush=True)
-    print(f"🎯 Стратегий: 6 (xG, Удары, Углы, Дроп, Атаки, Комбо)", flush=True)
+    print(f"🎯 Стратегии: xG, Удары, Углы, Атаки, Комбо", flush=True)
+    print(f"📉 Дроп 1X2 (П1/X/П2): {DROP_PCT}% за {DROP_WINDOW}с", flush=True)
     print(f"⏸️ Пауза после гола: {GOAL_COOLDOWN_SEC // 60} мин", flush=True)
     print(f"🚫 Ничья (кроме 0:0) — пропуск", flush=True)
     print("=" * 60, flush=True)
