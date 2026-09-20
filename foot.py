@@ -39,54 +39,49 @@ LEAGUE_IDS = {
     2252762: "🏆 Лига Конференций УЕФА",
 }
 
-RUSCORE_LEAGUES_FILTER = [
-    "премьер-лига", "бундеслига", "ла лига", "серия а", "лига 1",
-    "россии", "рпл", "лига чемпионов", "лига европы", "лига конференций",
-]
-
 # =====================================================================
-# ПОРОГИ
+# ПОРОГИ СТРАТЕГИЙ (каждая независима)
 # =====================================================================
-# Уровень A (🔥🔥)
-A_XG_DIFF      = 1.6
-A_SHOTS_ALL    = 12
-A_SHOTS_ON     = 4
-A_ATT_DIFF     = 28
-A_CORNERS_DIFF = 3
-A_ATT_CONV     = 0.20
-A_MIN_ODD      = 1.3
+# Стратегия 1: xG-мощь
+S1_XG_DIFF       = 1.3
+S1_SHOTS_ON_DIFF = 3
+S1_MIN_ODD       = 1.4
 
-# Уровень B (🟢)
-B_XG_DIFF      = 1.2
-B_SHOTS_ALL    = 9
-B_SHOTS_ON     = 3
-B_ATT_DIFF     = 20
-B_CORNERS_DIFF = 2
-B_ATT_CONV     = 0.15
-B_MIN_ODD      = 1.5
+# Стратегия 2: Удары
+S2_SHOTS_DIFF    = 8
+S2_SHOTS_ON_DIFF = 3
+S2_MIN_ODD       = 1.4
 
+# Стратегия 3: Углы + атаки
+S3_CORNERS_DIFF  = 4
+S3_ATT_DIFF      = 20
+S3_MIN_ODD       = 1.4
+
+# Стратегия 4: Дроп кэфа
+S4_DROP_PCT      = -10.0
+S4_DROP_WINDOW   = 180
+
+# Стратегия 5: Опасные атаки
+S5_ATT_DIFF      = 30
+S5_MIN_ODD       = 1.4
+
+# Стратегия 6: Комбо (xG + углы)
+S6_XG_DIFF       = 1.0
+S6_CORNERS_DIFF  = 3
+S6_MIN_ODD       = 1.4
+
+# Общие
 MAX_MINUTE        = 80
 UPDATE_INTERVAL   = 60
 ANTISPAM_SEC      = 900
 GOAL_COOLDOWN_SEC = 600
-DECAY_WINDOW_MIN  = 5
-DECAY_MIN_DXG     = 0.05
-DYNAMIC_WINDOWS   = [3, 5, 10, 15]
 
-# Дроп кэфа
-ODDS_DROP_WINDOW_SEC = 180       # окно сравнения 3 минуты
-ODDS_DROP_PCT        = -10.0     # падение 10%+
-ODDS_HISTORY_MAXLEN  = 30
-
-# Проверка результата
-CHECK_FIRST_AFTER  = 1800
-CHECK_REPEAT_AFTER = 1800
-CHECK_MAX_ATTEMPTS = 4
-
+# Ночной режим
 SLEEP_HOUR_START = 1
 SLEEP_HOUR_END   = 12
 SCHEDULE_REFRESH_SEC = 3600
 
+# Ruscore
 RUSCORE_URL = "https://api-statistics.ruscore.ru/v1/events"
 RUSCORE_PARAMS = {
     "app_id": "ruscore",
@@ -94,6 +89,15 @@ RUSCORE_PARAMS = {
     "lang": "ru",
     "tz": "Europe/Moscow"
 }
+RUSCORE_LEAGUES_FILTER = [
+    "премьер-лига", "бундеслига", "ла лига", "серия а", "лига 1",
+    "россии", "рпл", "лига чемпионов", "лига европы", "лига конференций",
+]
+
+# Проверка результата
+CHECK_FIRST_AFTER  = 1800
+CHECK_REPEAT_AFTER = 1800
+CHECK_MAX_ATTEMPTS = 4
 
 # =====================================================================
 # ЗАГОЛОВКИ
@@ -139,13 +143,12 @@ print("✅ Настройки загружены", flush=True)
 # =====================================================================
 # СОСТОЯНИЕ
 # =====================================================================
-sent_signals = {}
-pending_checks = {}
+sent_signals = {}        # {f"{gid}_{strategy}": ts}
+pending_checks = {}      # {gid_strategy: {...}}
+last_scores = {}         # {gid: {"score": "2-1", "changed_at": ts}}
+odds_history = {}        # {gid: deque([{ts, tb, p1, x, p2}, ...], maxlen=30)}
 schedule_windows = []
 schedule_updated_at = None
-last_scores = {}
-history = {}         # {gid: deque([snapshot, ...], maxlen=30)}
-odds_history = {}    # {gid: deque([{ts, tb, p1, x, p2}, ...], maxlen=30)}
 
 # =====================================================================
 # ВРЕМЯ
@@ -155,14 +158,12 @@ def is_active_time():
     return not (SLEEP_HOUR_START <= h < SLEEP_HOUR_END)
 
 # =====================================================================
-# API
+# API — LIVE FEED
 # =====================================================================
 def get_live_games():
     url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
-    params = {
-        "cfView": 3, "count": 40, "fcountry": 1,
-        "gr": 2336, "grMode": 4, "lng": "ru", "ref": 1,
-    }
+    params = {"cfView": 3, "count": 40, "fcountry": 1,
+              "gr": 2336, "grMode": 4, "lng": "ru", "ref": 1}
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=15)
         print(f"   🔎 HTTP {r.status_code}", flush=True)
@@ -229,291 +230,33 @@ def get_1x2_odds(game):
         break
     return p1, x, p2
 
-# =====================================================================
-# ИСТОРИЯ МЕТРИК
-# =====================================================================
-def update_history(gid, snap):
-    if gid not in history:
-        history[gid] = deque(maxlen=30)
-    history[gid].append(snap)
-
-def get_dyn(gid, now_minute, window_min):
-    if gid not in history or len(history[gid]) < 2:
-        return None
-    cur = history[gid][-1]
-    prev = None
-    for snap in reversed(history[gid]):
-        if now_minute - snap["minute"] >= window_min:
-            prev = snap
-            break
-    if prev is None:
-        return None
-    return {
-        "dxg1": cur["xg1"] - prev["xg1"],
-        "dxg2": cur["xg2"] - prev["xg2"],
-        "dshots_all1": cur["shots_all1"] - prev["shots_all1"],
-        "dshots_all2": cur["shots_all2"] - prev["shots_all2"],
-        "dshots_on1": cur["shots_on1"] - prev["shots_on1"],
-        "dshots_on2": cur["shots_on2"] - prev["shots_on2"],
-        "datt1": cur["att1"] - prev["att1"],
-        "datt2": cur["att2"] - prev["att2"],
-        "dcorners1": cur["corners1"] - prev["corners1"],
-        "dcorners2": cur["corners2"] - prev["corners2"],
-        "minutes": now_minute - prev["minute"],
-    }
-
-# =====================================================================
-# ИСТОРИЯ КЭФОВ + ДРОП
-# =====================================================================
 def save_odds(gid, now_ts, tb, p1, x, p2):
     if gid not in odds_history:
-        odds_history[gid] = deque(maxlen=ODDS_HISTORY_MAXLEN)
-    odds_history[gid].append({
-        "ts": now_ts, "tb": tb, "p1": p1, "x": x, "p2": p2,
-    })
+        odds_history[gid] = deque(maxlen=30)
+    odds_history[gid].append({"ts": now_ts, "tb": tb, "p1": p1, "x": x, "p2": p2})
 
-def check_odds_drop(gid, now_ts):
+def check_drop(gid, now_ts):
     if gid not in odds_history or len(odds_history[gid]) < 2:
         return None
-
     cur = odds_history[gid][-1]
     prev = None
     for h in reversed(odds_history[gid][:-1]):
-        if now_ts - h["ts"] >= ODDS_DROP_WINDOW_SEC:
+        if now_ts - h["ts"] >= S4_DROP_WINDOW:
             prev = h
             break
-
     if prev is None:
         return None
-
-    results = []
+    res = []
     for key, label in [("tb", "ТБ"), ("p1", "П1"), ("x", "X"), ("p2", "П2")]:
-        c_val = cur.get(key)
-        p_val = prev.get(key)
-        if not c_val or not p_val:
+        c, p = cur.get(key), prev.get(key)
+        if not c or not p:
             continue
-        change = (c_val - p_val) / p_val * 100
-        if change <= ODDS_DROP_PCT:
-            results.append({
-                "label": label,
-                "from": p_val,
-                "to": c_val,
-                "change_pct": round(change, 1),
-                "window_sec": now_ts - prev["ts"],
-            })
-
-    return results if results else None
-
-# =====================================================================
-# ЯДРО АНАЛИЗА
-# =====================================================================
-def analyze_game(game, now_ts):
-    if not isinstance(game, dict):
-        return None
-    if (game.get("sport") or {}).get("id") != 1:
-        return None
-
-    liga_id = (game.get("liga") or {}).get("id")
-    if liga_id not in LEAGUE_IDS:
-        return None
-
-    scores = game.get("scores") or {}
-    if (scores.get("currentPeriodName") == "Игра завершена" or
-            scores.get("statusLineStr", "") == ""):
-        if not scores.get("timer", {}).get("timeRun"):
-            return None
-
-    timer = scores.get("timer") or {}
-    minute = timer.get("timeSec", 0) // 60
-    score = scores.get("fullScore", "0-0")
-
-    try:
-        s1, s2 = map(int, score.split("-"))
-    except ValueError:
-        s1, s2 = 0, 0
-
-    # Ничья (кроме 0:0)
-    if s1 == s2 and s1 != 0:
-        return None
-
-    # Пауза после гола
-    gid = game.get("id")
-    prev = last_scores.get(gid, {})
-    if prev.get("score") and prev["score"] != score:
-        last_scores[gid] = {"score": score, "changed_at": now_ts}
-        return None
-    if prev.get("changed_at"):
-        if now_ts - prev["changed_at"] < GOAL_COOLDOWN_SEC:
-            return None
-
-    # Статистика
-    stats = parse_stats(game)
-    xg1 = sv(stats, "xG", "s1")
-    xg2 = sv(stats, "xG", "s2")
-
-    shots_on1  = int(sv(stats, "Удары в створ", "s1"))
-    shots_on2  = int(sv(stats, "Удары в створ", "s2"))
-    shots_off1 = int(sv(stats, "Удары в сторону ворот", "s1"))
-    shots_off2 = int(sv(stats, "Удары в сторону ворот", "s2"))
-    shots_all1 = shots_on1 + shots_off1
-    shots_all2 = shots_on2 + shots_off2
-
-    att1 = int(sv(stats, "Опасные атаки", "s1"))
-    att2 = int(sv(stats, "Опасные атаки", "s2"))
-    att_all1 = int(sv(stats, "Атаки", "s1"))
-    att_all2 = int(sv(stats, "Атаки", "s2"))
-    corners1 = int(sv(stats, "Угловые", "s1"))
-    corners2 = int(sv(stats, "Угловые", "s2"))
-    poss1 = int(sv(stats, "Владение мячом %", "s1"))
-    poss2 = int(sv(stats, "Владение мячом %", "s2"))
-    yellow1 = int(sv(stats, "Желтые карточки", "s1"))
-    yellow2 = int(sv(stats, "Желтые карточки", "s2"))
-    red1 = int(sv(stats, "Красные карточки", "s1"))
-    red2 = int(sv(stats, "Красные карточки", "s2"))
-    subs1 = int(sv(stats, "Замены", "s1"))
-    subs2 = int(sv(stats, "Замены", "s2"))
-    kp1 = int(sv(stats, "Ключевые передачи", "s1"))
-    kp2 = int(sv(stats, "Ключевые передачи", "s2"))
-
-    # Сохраняем кэфы
-    odd_tb = get_odd_total(game, s1 + s2)
-    odd_p1, odd_x, odd_p2 = get_1x2_odds(game)
-    save_odds(gid, now_ts, odd_tb, odd_p1, odd_x, odd_p2)
-
-    # История
-    snap = {
-        "ts": now_ts, "minute": minute,
-        "xg1": xg1, "xg2": xg2,
-        "shots_all1": shots_all1, "shots_all2": shots_all2,
-        "shots_on1": shots_on1, "shots_on2": shots_on2,
-        "att1": att1, "att2": att2,
-        "corners1": corners1, "corners2": corners2,
-    }
-    update_history(gid, snap)
-
-    # Направление давления
-    if xg1 > xg2 and shots_all1 > shots_all2 and att1 > att2:
-        side = "home"
-        p_xg, p_sh_all, p_sh_on = xg1 - xg2, shots_all1 - shots_all2, shots_on1 - shots_on2
-        p_att, p_corners = att1 - att2, corners1 - corners2
-        p_poss = poss1 - poss2
-        p_att_abs = att1
-    elif xg2 > xg1 and shots_all2 > shots_all1 and att2 > att1:
-        side = "away"
-        p_xg, p_sh_all, p_sh_on = xg2 - xg1, shots_all2 - shots_all1, shots_on2 - shots_on1
-        p_att, p_corners = att2 - att1, corners2 - corners1
-        p_poss = poss2 - poss1
-        p_att_abs = att2
-    else:
-        return None
-
-    # xG фиктивный
-    if p_xg >= 1.3 and p_sh_on < 2:
-        return None
-
-    # Красная у давящей
-    red_side = red1 if side == "home" else red2
-    red_opp  = red2 if side == "home" else red1
-    if red_side > 0:
-        return None
-
-    # Поздно
-    if minute > MAX_MINUTE:
-        return None
-
-    # Динамика
-    dyns = {w: get_dyn(gid, minute, w) for w in DYNAMIC_WINDOWS}
-
-    def dxg_side(d):
-        return (d["dxg1"] if side == "home" else d["dxg2"]) if d else None
-
-    dyn_xg_5  = dxg_side(dyns.get(5))
-    dyn_xg_10 = dxg_side(dyns.get(10))
-    dyn_xg_15 = dxg_side(dyns.get(15))
-
-    # Decay
-    decay_check = dyns.get(DECAY_WINDOW_MIN)
-    if decay_check and minute > 40:
-        d_side = dxg_side(decay_check)
-        if d_side is not None and d_side < DECAY_MIN_DXG:
-            return None
-
-    # Conversion
-    conv = p_sh_all / max(p_att_abs, 1)
-
-    # Скорость xG
-    speed_xg = None
-    if dyns.get(5) and dyns[5]["minutes"] > 0:
-        speed_xg = dxg_side(dyns[5]) / dyns[5]["minutes"]
-
-    # Уровень A
-    is_A = (
-        p_xg >= A_XG_DIFF and
-        p_sh_all >= A_SHOTS_ALL and
-        p_sh_on >= A_SHOTS_ON and
-        p_att >= A_ATT_DIFF and
-        p_corners >= A_CORNERS_DIFF and
-        conv >= A_ATT_CONV
-    )
-    # Уровень B
-    is_B = (
-        p_xg >= B_XG_DIFF and
-        p_sh_all >= B_SHOTS_ALL and
-        p_sh_on >= B_SHOTS_ON and
-        p_att >= B_ATT_DIFF and
-        p_corners >= B_CORNERS_DIFF and
-        conv >= B_ATT_CONV
-    )
-    if not is_A and not is_B:
-        return None
-
-    if is_B and dyn_xg_10 is not None and dyn_xg_10 >= 0.3:
-        is_A = True
-
-    level = "A" if is_A else "B"
-    signal_type = "🔥🔥 СИЛЬНЫЙ СИГНАЛ" if is_A else "🟢 СИГНАЛ НА ГОЛ"
-
-    # Value-фильтр по кэфу
-    min_odd = A_MIN_ODD if is_A else B_MIN_ODD
-    if odd_tb is not None and odd_tb < min_odd:
-        print(f"   💸 Пропуск {score} — кэф {odd_tb} < {min_odd}", flush=True)
-        return None
-
-    o1 = (game.get("opponent1") or {}).get("fullName", "?")
-    o2 = (game.get("opponent2") or {}).get("fullName", "?")
-    dominant = o1 if side == "home" else o2
-    total = s1 + s2
-
-    return {
-        "game_id":   gid,
-        "team1":     o1, "team2": o2,
-        "match":     f"{o1} — {o2}",
-        "league":    LEAGUE_IDS.get(liga_id, ""),
-        "score":     score, "minute": minute,
-        "xg":        f"{xg1:.2f} — {xg2:.2f}",
-        "xg_diff":   round(p_xg, 2),
-        "shots_all": f"{shots_all1} — {shots_all2}",
-        "shots_on":  f"{shots_on1} — {shots_on2}",
-        "attacks":   f"{att1} — {att2}",
-        "corners":   f"{corners1} — {corners2}",
-        "poss":      f"{poss1}% — {poss2}%",
-        "yellow":    f"{yellow1} — {yellow2}",
-        "red":       f"{red1} — {red2}",
-        "subs":      f"{subs1} — {subs2}",
-        "key_pass":  f"{kp1} — {kp2}",
-        "conv":      round(conv, 2),
-        "speed_xg":  round(speed_xg, 3) if speed_xg else None,
-        "dyn_xg_5":  round(dyn_xg_5, 2) if dyn_xg_5 is not None else None,
-        "dyn_xg_10": round(dyn_xg_10, 2) if dyn_xg_10 is not None else None,
-        "dyn_xg_15": round(dyn_xg_15, 2) if dyn_xg_15 is not None else None,
-        "dominant":  dominant,
-        "red_opp":   red_opp,
-        "signal":    signal_type,
-        "level":     level,
-        "odd_tb":    odd_tb,
-        "tb_line":   total + 0.5,
-        "tb_line2":  total + 1.5,
-    }
+        change = (c - p) / p * 100
+        if change <= S4_DROP_PCT:
+            res.append({"label": label, "from": p, "to": c,
+                        "change_pct": round(change, 1),
+                        "window": now_ts - prev["ts"]})
+    return res if res else None
 
 # =====================================================================
 # TELEGRAM
@@ -538,60 +281,293 @@ def edit_telegram(message_id, text):
         print(f"❌ TG edit: {e}", flush=True)
         return False
 
-def fmt_opt(v):
-    return f"{v}" if v is not None else "—"
-
-def format_signal(s):
-    odd = f"💰 Кэф ТБ {s['tb_line']}: <b>{s['odd_tb']}</b>" if s['odd_tb'] else "💰 Кэф: —"
-    conv = f"📊 Conversion: <b>{s['conv']}</b>"
-    speed = f"⚡ Скорость xG: <b>{s['speed_xg']}</b>/мин" if s['speed_xg'] else "⚡ Скорость: —"
-    dyn = (f"📈 ΔxG: 5м={fmt_opt(s['dyn_xg_5'])} | "
-           f"10м={fmt_opt(s['dyn_xg_10'])} | "
-           f"15м={fmt_opt(s['dyn_xg_15'])}")
-    red_note = f"\n🟥 Красная у соперника!" if s['red_opp'] > 0 else ""
-
-    return (
-        f"{s['signal']} (уровень {s['level']})\n"
-        f"{s['league']}\n"
-        f"⚽ <b>{s['match']}</b>\n"
-        f"📊 Счёт: <b>{s['score']}</b> | ⏱ {s['minute']}'\n"
-        f"🎯 xG: {s['xg']} (Δ {s['xg_diff']})\n"
-        f"🥅 Удары: {s['shots_all']} (в створ {s['shots_on']})\n"
-        f"⚔️ Опасные атаки: {s['attacks']}\n"
-        f"🌐 Владение: {s['poss']}\n"
-        f"🚩 Углы: {s['corners']}\n"
-        f"🎯 Ключевые: {s['key_pass']}\n"
-        f"🟨 {s['yellow']} | 🟥 {s['red']}\n"
-        f"🔄 Замены: {s['subs']}{red_note}\n"
-        f"👉 Давит: <b>{s['dominant']}</b>\n"
-        f"{dyn}\n"
-        f"{speed}\n"
-        f"{conv}\n"
-        f"{odd}\n"
-        f"💡 <b>ТБ {s['tb_line']} / ТБ {s['tb_line2']}</b>"
-    )
-
-def format_drop_signal(league, match, score, minute, drops):
-    lines = [f"📉 <b>ДРОП КЭФА</b>", league, f"⚽ <b>{match}</b>",
-             f"📊 Счёт: <b>{score}</b> | ⏱ {minute}'", ""]
-    for d in drops:
-        lines.append(f"• {d['label']}: {d['from']} → {d['to']} "
-                     f"({d['change_pct']}% за {d['window_sec']}с)")
-    lines.append("💡 Умные деньги идут на событие")
-    return "\n".join(lines)
-
 def format_with_result(base_text, result_line):
     return f"{base_text}\n\n{result_line}"
 
 # =====================================================================
-# RUSCORE
+# БАЗОВЫЙ ПАРСИНГ МАТЧА
+# =====================================================================
+def parse_game(game):
+    if not isinstance(game, dict):
+        return None
+    if (game.get("sport") or {}).get("id") != 1:
+        return None
+
+    liga_id = (game.get("liga") or {}).get("id")
+    if liga_id not in LEAGUE_IDS:
+        return None
+
+    scores = game.get("scores") or {}
+    if (scores.get("currentPeriodName") == "Игра завершена" or
+            scores.get("statusLineStr", "") == ""):
+        if not scores.get("timer", {}).get("timeRun"):
+            return None
+
+    minute = (scores.get("timer") or {}).get("timeSec", 0) // 60
+    score = scores.get("fullScore", "0-0")
+    try:
+        s1, s2 = map(int, score.split("-"))
+    except ValueError:
+        s1, s2 = 0, 0
+
+    stats = parse_stats(game)
+
+    xg1 = sv(stats, "xG", "s1")
+    xg2 = sv(stats, "xG", "s2")
+    shots_on1 = int(sv(stats, "Удары в створ", "s1"))
+    shots_on2 = int(sv(stats, "Удары в створ", "s2"))
+    shots_off1 = int(sv(stats, "Удары в сторону ворот", "s1"))
+    shots_off2 = int(sv(stats, "Удары в сторону ворот", "s2"))
+    shots_all1 = shots_on1 + shots_off1
+    shots_all2 = shots_on2 + shots_off2
+    att1 = int(sv(stats, "Опасные атаки", "s1"))
+    att2 = int(sv(stats, "Опасные атаки", "s2"))
+    corners1 = int(sv(stats, "Угловые", "s1"))
+    corners2 = int(sv(stats, "Угловые", "s2"))
+    red1 = int(sv(stats, "Красные карточки", "s1"))
+    red2 = int(sv(stats, "Красные карточки", "s2"))
+    yellow1 = int(sv(stats, "Желтые карточки", "s1"))
+    yellow2 = int(sv(stats, "Желтые карточки", "s2"))
+    subs1 = int(sv(stats, "Замены", "s1"))
+    subs2 = int(sv(stats, "Замены", "s2"))
+    kp1 = int(sv(stats, "Ключевые передачи", "s1"))
+    kp2 = int(sv(stats, "Ключевые передачи", "s2"))
+
+    o1 = (game.get("opponent1") or {}).get("fullName", "?")
+    o2 = (game.get("opponent2") or {}).get("fullName", "?")
+
+    return {
+        "game_id": game.get("id"),
+        "liga_id": liga_id,
+        "league": LEAGUE_IDS.get(liga_id, ""),
+        "team1": o1, "team2": o2,
+        "match": f"{o1} — {o2}",
+        "minute": minute, "score": score,
+        "s1": s1, "s2": s2,
+        "xg1": xg1, "xg2": xg2,
+        "shots_on1": shots_on1, "shots_on2": shots_on2,
+        "shots_all1": shots_all1, "shots_all2": shots_all2,
+        "att1": att1, "att2": att2,
+        "corners1": corners1, "corners2": corners2,
+        "red1": red1, "red2": red2,
+        "yellow1": yellow1, "yellow2": yellow2,
+        "subs1": subs1, "subs2": subs2,
+        "kp1": kp1, "kp2": kp2,
+    }
+
+# =====================================================================
+# ПРОВЕРКА ОБЩИХ ФИЛЬТРОВ
+# =====================================================================
+def common_ok(p, gid, now_ts):
+    """Общие фильтры для всех стратегий."""
+    # Ничья (кроме 0:0)
+    if p["s1"] == p["s2"] and p["s1"] != 0:
+        return False
+    # Слишком поздно
+    if p["minute"] > MAX_MINUTE:
+        return False
+    # Пауза после гола
+    prev = last_scores.get(gid, {})
+    if prev.get("score") and prev["score"] != p["score"]:
+        last_scores[gid] = {"score": p["score"], "changed_at": now_ts}
+        return False
+    if prev.get("changed_at"):
+        if now_ts - prev["changed_at"] < GOAL_COOLDOWN_SEC:
+            return False
+    return True
+
+# =====================================================================
+# СТРАТЕГИЯ 1: xG-МОЩЬ
+# =====================================================================
+def strategy_xg(p):
+    xg_diff = abs(p["xg1"] - p["xg2"])
+    shots_on_diff = abs(p["shots_on1"] - p["shots_on2"])
+
+    if xg_diff < S1_XG_DIFF:
+        return None
+    if shots_on_diff < S1_SHOTS_ON_DIFF:
+        return None
+
+    # Красная у давящей
+    side = "home" if p["xg1"] > p["xg2"] else "away"
+    red_side = p["red1"] if side == "home" else p["red2"]
+    if red_side > 0:
+        return None
+
+    dominant = p["team1"] if side == "home" else p["team2"]
+
+    return {
+        "strategy": "xG-мощь",
+        "emoji": "🟢",
+        "dominant": dominant,
+        "key": f"xG diff {xg_diff:.2f}, удары в створ diff {shots_on_diff}",
+        "min_odd": S1_MIN_ODD,
+    }
+
+# =====================================================================
+# СТРАТЕГИЯ 2: УДАРЫ
+# =====================================================================
+def strategy_shots(p):
+    shots_diff = abs(p["shots_all1"] - p["shots_all2"])
+    shots_on_diff = abs(p["shots_on1"] - p["shots_on2"])
+
+    if shots_diff < S2_SHOTS_DIFF:
+        return None
+    if shots_on_diff < S2_SHOTS_ON_DIFF:
+        return None
+
+    side = "home" if p["shots_all1"] > p["shots_all2"] else "away"
+    red_side = p["red1"] if side == "home" else p["red2"]
+    if red_side > 0:
+        return None
+
+    dominant = p["team1"] if side == "home" else p["team2"]
+
+    return {
+        "strategy": "Удары",
+        "emoji": "🥅",
+        "dominant": dominant,
+        "key": f"удары всего {shots_diff}, в створ {shots_on_diff}",
+        "min_odd": S2_MIN_ODD,
+    }
+
+# =====================================================================
+# СТРАТЕГИЯ 3: УГЛЫ + АТАКИ
+# =====================================================================
+def strategy_corners(p):
+    corners_diff = abs(p["corners1"] - p["corners2"])
+    att_diff = abs(p["att1"] - p["att2"])
+
+    if corners_diff < S3_CORNERS_DIFF:
+        return None
+    if att_diff < S3_ATT_DIFF:
+        return None
+
+    side = "home" if p["corners1"] > p["corners2"] else "away"
+    red_side = p["red1"] if side == "home" else p["red2"]
+    if red_side > 0:
+        return None
+
+    dominant = p["team1"] if side == "home" else p["team2"]
+
+    return {
+        "strategy": "Углы + атаки",
+        "emoji": "🚩",
+        "dominant": dominant,
+        "key": f"углы {corners_diff}, атаки {att_diff}",
+        "min_odd": S3_MIN_ODD,
+    }
+
+# =====================================================================
+# СТРАТЕГИЯ 5: ОПАСНЫЕ АТАКИ
+# =====================================================================
+def strategy_attacks(p):
+    att_diff = abs(p["att1"] - p["att2"])
+    if att_diff < S5_ATT_DIFF:
+        return None
+
+    side = "home" if p["att1"] > p["att2"] else "away"
+    red_side = p["red1"] if side == "home" else p["red2"]
+    if red_side > 0:
+        return None
+
+    dominant = p["team1"] if side == "home" else p["team2"]
+
+    return {
+        "strategy": "Опасные атаки",
+        "emoji": "⚔️",
+        "dominant": dominant,
+        "key": f"атаки diff {att_diff}",
+        "min_odd": S5_MIN_ODD,
+    }
+
+# =====================================================================
+# СТРАТЕГИЯ 6: КОМБО (xG + углы)
+# =====================================================================
+def strategy_combo(p):
+    xg_diff = abs(p["xg1"] - p["xg2"])
+    corners_diff = abs(p["corners1"] - p["corners2"])
+
+    if xg_diff < S6_XG_DIFF:
+        return None
+    if corners_diff < S6_CORNERS_DIFF:
+        return None
+
+    side = "home" if p["xg1"] > p["xg2"] else "away"
+    red_side = p["red1"] if side == "home" else p["red2"]
+    if red_side > 0:
+        return None
+
+    dominant = p["team1"] if side == "home" else p["team2"]
+
+    return {
+        "strategy": "Комбо xG+углы",
+        "emoji": "💡",
+        "dominant": dominant,
+        "key": f"xG {xg_diff:.2f}, углы {corners_diff}",
+        "min_odd": S6_MIN_ODD,
+    }
+
+# =====================================================================
+# ФОРМАТ СИГНАЛА
+# =====================================================================
+def format_signal(p, strategy, odd):
+    side = "home" if strategy["dominant"] == p["team1"] else "away"
+
+    xg_dom = p["xg1"] if side == "home" else p["xg2"]
+    xg_opp = p["xg2"] if side == "home" else p["xg1"]
+    so_dom = p["shots_on1"] if side == "home" else p["shots_on2"]
+    so_opp = p["shots_on2"] if side == "home" else p["shots_on1"]
+    sa_dom = p["shots_all1"] if side == "home" else p["shots_all2"]
+    sa_opp = p["shots_all2"] if side == "home" else p["shots_all1"]
+    at_dom = p["att1"] if side == "home" else p["att2"]
+    at_opp = p["att2"] if side == "home" else p["att1"]
+    co_dom = p["corners1"] if side == "home" else p["corners2"]
+    co_opp = p["corners2"] if side == "home" else p["corners1"]
+
+    total = p["s1"] + p["s2"]
+    tb1 = total + 0.5
+    tb2 = total + 1.5
+
+    odd_str = f"💰 Кэф ТБ {tb1}: <b>{odd}</b>" if odd else "💰 Кэф: —"
+
+    return (
+        f"{strategy['emoji']} <b>СИГНАЛ: {strategy['strategy']}</b>\n"
+        f"{p['league']}\n"
+        f"⚽ <b>{p['match']}</b>\n"
+        f"📊 Счёт: <b>{p['score']}</b> | ⏱ {p['minute']}'\n"
+        f"🎯 xG: {xg_dom:.2f} — {xg_opp:.2f}\n"
+        f"🥅 Удары: {sa_dom} — {sa_opp} (в створ {so_dom} — {so_opp})\n"
+        f"⚔️ Опасные атаки: {at_dom} — {at_opp}\n"
+        f"🚩 Углы: {co_dom} — {co_opp}\n"
+        f"👉 Давит: <b>{strategy['dominant']}</b>\n"
+        f"🔑 {strategy['key']}\n"
+        f"{odd_str}\n"
+        f"💡 <b>Ожидается гол — ТБ {tb1} / ТБ {tb2}</b>"
+    )
+
+def format_drop_signal(p, drops):
+    lines = [
+        f"📉 <b>СИГНАЛ: Дроп кэфа</b>",
+        p["league"],
+        f"⚽ <b>{p['match']}</b>",
+        f"📊 Счёт: <b>{p['score']}</b> | ⏱ {p['minute']}'",
+        "",
+    ]
+    for d in drops:
+        lines.append(f"• {d['label']}: {d['from']} → {d['to']} "
+                     f"({d['change_pct']}% за {d['window']}с)")
+    lines.append("💡 Умные деньги идут на событие")
+    return "\n".join(lines)
+
+# =====================================================================
+# ПРОВЕРКА РЕЗУЛЬТАТА (ruscore)
 # =====================================================================
 def fetch_ruscore_events(date_str):
     params = dict(RUSCORE_PARAMS)
     params["date"] = date_str
     try:
         r = requests.get(RUSCORE_URL, params=params, headers=RUSCORE_HEADERS, timeout=15)
-        print(f"📅 ruscore: {r.status_code}", flush=True)
         if r.status_code != 200:
             return []
         data = r.json()
@@ -601,8 +577,7 @@ def fetch_ruscore_events(date_str):
                 ev["_league"] = block.get("name", "")
                 events.append(ev)
         return events
-    except Exception as e:
-        print(f"❌ ruscore: {e}", flush=True)
+    except Exception:
         return []
 
 def normalize_name(s):
@@ -612,8 +587,7 @@ def normalize_name(s):
             .replace("ё", "е").replace(".", "").strip())
 
 def find_match(events, team1, team2):
-    n1 = normalize_name(team1)
-    n2 = normalize_name(team2)
+    n1, n2 = normalize_name(team1), normalize_name(team2)
     for ev in events:
         h = normalize_name((ev.get("home") or {}).get("name", ""))
         a = normalize_name((ev.get("away") or {}).get("name", ""))
@@ -642,20 +616,20 @@ def check_pending_results():
 
     now = int(time.time())
     by_date = {}
-    for gid, info in pending_checks.items():
+    for key, info in pending_checks.items():
         if now < info.get("check_after", 0):
             continue
-        by_date.setdefault(info["date_str"], []).append(gid)
+        by_date.setdefault(info["date_str"], []).append(key)
 
-    for date_str, gids in by_date.items():
+    for date_str, keys in by_date.items():
         events = fetch_ruscore_events(date_str)
         if not events:
-            for gid in gids:
-                pending_checks[gid]["check_after"] = now + CHECK_REPEAT_AFTER
+            for k in keys:
+                pending_checks[k]["check_after"] = now + CHECK_REPEAT_AFTER
             continue
 
-        for gid in gids:
-            info = pending_checks.get(gid)
+        for k in keys:
+            info = pending_checks.get(k)
             if not info:
                 continue
 
@@ -667,7 +641,7 @@ def check_pending_results():
                     edit_telegram(info["message_id"],
                                   format_with_result(info["base_text"],
                                                      "❓ <b>РЕЗУЛЬТАТ НЕ НАЙДЕН</b>"))
-                    del pending_checks[gid]
+                    del pending_checks[k]
                 continue
 
             h_score, a_score = parse_score_from_ruscore(ev)
@@ -687,15 +661,15 @@ def check_pending_results():
                         f"📊 Стало: {h_score}-{a_score}\n"
                         f"⏱ ~{elapsed} мин")
                 edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
-                print(f"✅ {info['match']}", flush=True)
-                del pending_checks[gid]
+                print(f"✅ {info['match']} [{info['strategy']}]", flush=True)
+                del pending_checks[k]
                 continue
 
             if finished:
-                line = (f"❌ <b>НЕ ЗАШЛО</b>\n📊 Итог: {h_score}-{a_score}")
+                line = f"❌ <b>НЕ ЗАШЛО</b>\n📊 Итог: {h_score}-{a_score}"
                 edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
-                print(f"❌ {info['match']}", flush=True)
-                del pending_checks[gid]
+                print(f"❌ {info['match']} [{info['strategy']}]", flush=True)
+                del pending_checks[k]
                 continue
 
             info["attempts"] = info.get("attempts", 0) + 1
@@ -704,7 +678,7 @@ def check_pending_results():
                 edit_telegram(info["message_id"],
                               format_with_result(info["base_text"],
                                                  f"⏱ <b>БЕЗ РЕЗУЛЬТАТА</b> ({h_score}-{a_score})"))
-                del pending_checks[gid]
+                del pending_checks[k]
 
 # =====================================================================
 # РАСПИСАНИЕ
@@ -727,170 +701,4 @@ def get_today_schedule():
             continue
         try:
             dt = datetime.fromisoformat(t)
-            dt = dt.astimezone(MOSCOW_TZ) if dt.tzinfo else MOSCOW_TZ.localize(dt)
-            schedule.append({"time": dt})
-        except (ValueError, TypeError):
-            continue
-    return schedule
-
-def get_windows(schedule):
-    if not schedule:
-        return []
-    times = sorted([s["time"] for s in schedule])
-    windows = [(t, t + timedelta(hours=2)) for t in times]
-    merged = [windows[0]]
-    for start, end in windows[1:]:
-        ls, le = merged[-1]
-        if start <= le:
-            merged[-1] = (ls, max(le, end))
-        else:
-            merged.append((start, end))
-    return merged
-
-def refresh_schedule_if_needed():
-    global schedule_windows, schedule_updated_at
-    now = datetime.now(MOSCOW_TZ)
-    if schedule_updated_at and (now - schedule_updated_at).total_seconds() < SCHEDULE_REFRESH_SEC:
-        return
-    print("📅 Обновляем расписание...", flush=True)
-    schedule_windows = get_windows(get_today_schedule())
-    schedule_updated_at = now
-    if schedule_windows:
-        for s, e in schedule_windows:
-            print(f"   {s.strftime('%H:%M')} – {e.strftime('%H:%M')}", flush=True)
-
-def is_match_time():
-    if not schedule_windows:
-        return False
-    now = datetime.now(MOSCOW_TZ)
-    return any(s <= now <= e for s, e in schedule_windows)
-
-# =====================================================================
-# ОСНОВНОЙ ЦИКЛ
-# =====================================================================
-def monitor():
-    global sent_signals
-    print(f"🔄 {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}", flush=True)
-
-    games = get_live_games()
-    if not games:
-        print("   0 матчей", flush=True)
-        return
-
-    now_ts = int(time.time())
-    total_our = 0
-    total_signals = 0
-    total_drops = 0
-
-    by_league = {}
-    for game in games:
-        lid = (game.get("liga") or {}).get("id")
-        if lid in LEAGUE_IDS:
-            by_league[lid] = by_league.get(lid, 0) + 1
-    for lid, cnt in by_league.items():
-        print(f"  📋 {LEAGUE_IDS[lid]}: {cnt}", flush=True)
-
-    for game in games:
-        result = analyze_game(game, now_ts)
-        if not result:
-            continue
-        total_our += 1
-        gid = result["game_id"]
-
-        # ДРОП КЭФА — независимый сигнал
-        drops = check_odds_drop(gid, now_ts)
-        if drops:
-            drop_text = format_drop_signal(
-                result['league'], result['match'],
-                result['score'], result['minute'], drops
-            )
-            if send_telegram(drop_text):
-                total_drops += 1
-                print(f"    📉 ДРОП {result['match']} | "
-                      f"{drops[0]['label']} {drops[0]['change_pct']}%", flush=True)
-                time.sleep(1)
-
-        # Основной xG-сигнал
-        if gid in pending_checks:
-            if abs(pending_checks[gid].get("xg_diff", 0) - result["xg_diff"]) < 0.5:
-                continue
-
-        prev = sent_signals.get(gid)
-        if prev and (now_ts - prev["ts"]) < ANTISPAM_SEC:
-            if abs(prev["xg_diff"] - result["xg_diff"]) < 0.4:
-                continue
-
-        text = format_signal(result)
-        msg_id = send_telegram(text)
-        if msg_id:
-            sent_signals[gid] = {"xg_diff": result["xg_diff"], "ts": now_ts}
-            total_signals += 1
-            print(f"    📤 {result['match']} | {result['signal']} | "
-                  f"кэф {result['odd_tb']}", flush=True)
-
-            today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
-            try:
-                s1, s2 = map(int, result["score"].split("-"))
-            except ValueError:
-                s1, s2 = 0, 0
-
-            pending_checks[gid] = {
-                "team1": result["team1"], "team2": result["team2"],
-                "match": result["match"], "date_str": today,
-                "old_s1": s1, "old_s2": s2, "minute": result["minute"],
-                "signal_ts": now_ts, "message_id": msg_id, "base_text": text,
-                "xg_diff": result["xg_diff"],
-                "check_after": now_ts + CHECK_FIRST_AFTER, "attempts": 0,
-            }
-            time.sleep(1)
-
-    print(f"✅ {total_our} наших, {total_signals} сигналов, "
-          f"{total_drops} дропов, pending: {len(pending_checks)}", flush=True)
-
-    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v["ts"] < 1800}
-
-# =====================================================================
-# MAIN
-# =====================================================================
-def main():
-    print("🚀 БОТ ЗАПУЩЕН", flush=True)
-    print(f"📋 Лиг: {len(LEAGUE_IDS)}", flush=True)
-    print(f"🔥 A: xG≥{A_XG_DIFF}, shots≥{A_SHOTS_ALL}, att≥{A_ATT_DIFF}, "
-          f"corners≥{A_CORNERS_DIFF}, кэф≥{A_MIN_ODD}", flush=True)
-    print(f"🟢 B: xG≥{B_XG_DIFF}, shots≥{B_SHOTS_ALL}, att≥{B_ATT_DIFF}, "
-          f"corners≥{B_CORNERS_DIFF}, кэф≥{B_MIN_ODD}", flush=True)
-    print(f"📉 Дроп: ≥{abs(ODDS_DROP_PCT)}% за {ODDS_DROP_WINDOW_SEC}с", flush=True)
-    print(f"⏸️ Пауза после гола: {GOAL_COOLDOWN_SEC // 60} мин", flush=True)
-    print(f"🚫 Ничья (кроме 0:0) — пропуск", flush=True)
-    print("=" * 60, flush=True)
-
-    while True:
-        try:
-            now_str = datetime.now(MOSCOW_TZ).strftime('%H:%M')
-            if not is_active_time():
-                print(f"😴 Ночь ({now_str})", flush=True)
-                time.sleep(600)
-                continue
-
-            refresh_schedule_if_needed()
-
-            if is_match_time():
-                monitor()
-                check_pending_results()
-                time.sleep(UPDATE_INTERVAL)
-            else:
-                print(f"💤 Матчей нет ({now_str})", flush=True)
-                check_pending_results()
-                time.sleep(600)
-
-        except KeyboardInterrupt:
-            print("⏹️", flush=True)
-            break
-        except Exception as e:
-            print(f"❌ {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            time.sleep(30)
-
-if __name__ == "__main__":
-    main()
+            dt = dt.astimezone
