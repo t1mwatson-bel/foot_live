@@ -40,7 +40,7 @@ LEAGUE_IDS = {
 }
 
 # =====================================================================
-# ПОРОГИ СТРАТЕГИЙ (каждая независима)
+# ПОРОГИ СТРАТЕГИЙ
 # =====================================================================
 # Стратегия 1: xG-мощь
 S1_XG_DIFF       = 1.3
@@ -76,7 +76,6 @@ UPDATE_INTERVAL   = 60
 ANTISPAM_SEC      = 900
 GOAL_COOLDOWN_SEC = 600
 
-# Ночной режим
 SLEEP_HOUR_START = 1
 SLEEP_HOUR_END   = 12
 SCHEDULE_REFRESH_SEC = 3600
@@ -143,10 +142,10 @@ print("✅ Настройки загружены", flush=True)
 # =====================================================================
 # СОСТОЯНИЕ
 # =====================================================================
-sent_signals = {}        # {f"{gid}_{strategy}": ts}
-pending_checks = {}      # {gid_strategy: {...}}
-last_scores = {}         # {gid: {"score": "2-1", "changed_at": ts}}
-odds_history = {}        # {gid: deque([{ts, tb, p1, x, p2}, ...], maxlen=30)}
+sent_signals = {}
+pending_checks = {}
+last_scores = {}
+odds_history = {}
 schedule_windows = []
 schedule_updated_at = None
 
@@ -178,7 +177,7 @@ def get_live_games():
         return []
 
 # =====================================================================
-# ПАРСИНГ
+# ПАРСИНГ СТАТИСТИКИ
 # =====================================================================
 def parse_stats(game):
     stats = {}
@@ -197,6 +196,9 @@ def sv(stats, name, side="s1"):
     except (ValueError, TypeError):
         return 0.0
 
+# =====================================================================
+# ПАРСИНГ КЭФОВ
+# =====================================================================
 def get_odd_total(game, total_goals):
     target = total_goals + 0.5
     for grp in (game.get("centralBlockEventGroups") or []):
@@ -356,17 +358,13 @@ def parse_game(game):
     }
 
 # =====================================================================
-# ПРОВЕРКА ОБЩИХ ФИЛЬТРОВ
+# ОБЩИЕ ФИЛЬТРЫ
 # =====================================================================
 def common_ok(p, gid, now_ts):
-    """Общие фильтры для всех стратегий."""
-    # Ничья (кроме 0:0)
     if p["s1"] == p["s2"] and p["s1"] != 0:
         return False
-    # Слишком поздно
     if p["minute"] > MAX_MINUTE:
         return False
-    # Пауза после гола
     prev = last_scores.get(gid, {})
     if prev.get("score") and prev["score"] != p["score"]:
         last_scores[gid] = {"score": p["score"], "changed_at": now_ts}
@@ -388,7 +386,6 @@ def strategy_xg(p):
     if shots_on_diff < S1_SHOTS_ON_DIFF:
         return None
 
-    # Красная у давящей
     side = "home" if p["xg1"] > p["xg2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
     if red_side > 0:
@@ -509,7 +506,7 @@ def strategy_combo(p):
     }
 
 # =====================================================================
-# ФОРМАТ СИГНАЛА
+# ФОРМАТ СООБЩЕНИЙ
 # =====================================================================
 def format_signal(p, strategy, odd):
     side = "home" if strategy["dominant"] == p["team1"] else "away"
@@ -561,7 +558,7 @@ def format_drop_signal(p, drops):
     return "\n".join(lines)
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТА (ruscore)
+# RUSCORE
 # =====================================================================
 def fetch_ruscore_events(date_str):
     params = dict(RUSCORE_PARAMS)
@@ -701,4 +698,209 @@ def get_today_schedule():
             continue
         try:
             dt = datetime.fromisoformat(t)
-            dt = dt.astimezone
+            dt = dt.astimezone(MOSCOW_TZ) if dt.tzinfo else MOSCOW_TZ.localize(dt)
+            schedule.append({"time": dt})
+        except (ValueError, TypeError):
+            continue
+    return schedule
+
+def get_windows(schedule):
+    if not schedule:
+        return []
+    times = sorted([s["time"] for s in schedule])
+    windows = [(t, t + timedelta(hours=2)) for t in times]
+    merged = [windows[0]]
+    for start, end in windows[1:]:
+        ls, le = merged[-1]
+        if start <= le:
+            merged[-1] = (ls, max(le, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+def refresh_schedule_if_needed():
+    global schedule_windows, schedule_updated_at
+    now = datetime.now(MOSCOW_TZ)
+    if schedule_updated_at and (now - schedule_updated_at).total_seconds() < SCHEDULE_REFRESH_SEC:
+        return
+    print("📅 Обновляем расписание...", flush=True)
+    schedule_windows = get_windows(get_today_schedule())
+    schedule_updated_at = now
+    if schedule_windows:
+        for s, e in schedule_windows:
+            print(f"   {s.strftime('%H:%M')} – {e.strftime('%H:%M')}", flush=True)
+
+def is_match_time():
+    if not schedule_windows:
+        return False
+    now = datetime.now(MOSCOW_TZ)
+    return any(s <= now <= e for s, e in schedule_windows)
+
+# =====================================================================
+# ОТПРАВКА СИГНАЛА (единая точка)
+# =====================================================================
+def try_send_signal(p, strategy, now_ts):
+    """
+    Отправляет сигнал, если не антиспам.
+    Возвращает True если отправили.
+    """
+    gid = p["game_id"]
+    key = f"{gid}_{strategy['strategy']}"
+
+    # Антиспам
+    prev = sent_signals.get(key)
+    if prev and (now_ts - prev) < ANTISPAM_SEC:
+        return False
+
+    # Кэф для value-фильтра
+    odd = get_odd_total(p_game_cache.get(gid, {}), p["s1"] + p["s2"])
+
+    # Value-фильтр
+    if odd is not None and odd < strategy["min_odd"]:
+        print(f"    💸 Пропуск {p['match']} [{strategy['strategy']}] — кэф {odd} < {strategy['min_odd']}", flush=True)
+        return False
+
+    text = format_signal(p, strategy, odd)
+    msg_id = send_telegram(text)
+    if not msg_id:
+        return False
+
+    sent_signals[key] = now_ts
+    print(f"    📤 {p['match']} | {strategy['emoji']} {strategy['strategy']} | кэф {odd}", flush=True)
+
+    # Добавляем в pending для проверки результата
+    today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+    pending_checks[key] = {
+        "team1": p["team1"], "team2": p["team2"],
+        "match": p["match"], "date_str": today,
+        "old_s1": p["s1"], "old_s2": p["s2"],
+        "minute": p["minute"], "signal_ts": now_ts,
+        "message_id": msg_id, "base_text": text,
+        "strategy": strategy["strategy"],
+        "check_after": now_ts + CHECK_FIRST_AFTER,
+        "attempts": 0,
+    }
+    time.sleep(1)
+    return True
+
+# =====================================================================
+# КЭШ ДЛЯ VALUE-ФИЛЬТРА
+# =====================================================================
+p_game_cache = {}
+
+# =====================================================================
+# ОСНОВНОЙ ЦИКЛ
+# =====================================================================
+def monitor():
+    global sent_signals, p_game_cache
+
+    print(f"🔄 {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}", flush=True)
+
+    games = get_live_games()
+    if not games:
+        print("   0 матчей", flush=True)
+        return
+
+    now_ts = int(time.time())
+    p_game_cache = {g.get("id"): g for g in games if isinstance(g, dict)}
+
+    total_our = 0
+    total_signals = 0
+    total_drops = 0
+
+    by_league = {}
+    for game in games:
+        lid = (game.get("liga") or {}).get("id")
+        if lid in LEAGUE_IDS:
+            by_league[lid] = by_league.get(lid, 0) + 1
+    for lid, cnt in by_league.items():
+        print(f"  📋 {LEAGUE_IDS[lid]}: {cnt}", flush=True)
+
+    for game in games:
+        p = parse_game(game)
+        if not p:
+            continue
+
+        gid = p["game_id"]
+
+        # Сохраняем кэфы
+        odd_tb = get_odd_total(game, p["s1"] + p["s2"])
+        odd_p1, odd_x, odd_p2 = get_1x2_odds(game)
+        save_odds(gid, now_ts, odd_tb, odd_p1, odd_x, odd_p2)
+
+        # СТРАТЕГИЯ 4: ДРОП КЭФА (независимая, до common_ok)
+        drops = check_drop(gid, now_ts)
+        if drops:
+            drop_text = format_drop_signal(p, drops)
+            drop_key = f"{gid}_DROP"
+            prev_drop = sent_signals.get(drop_key)
+            if not (prev_drop and (now_ts - prev_drop) < ANTISPAM_SEC):
+                if send_telegram(drop_text):
+                    sent_signals[drop_key] = now_ts
+                    total_drops += 1
+                    print(f"    📉 ДРОП {p['match']} | {drops[0]['label']} {drops[0]['change_pct']}%", flush=True)
+                    time.sleep(1)
+
+        # Общие фильтры для стратегий 1-3,5,6
+        if not common_ok(p, gid, now_ts):
+            continue
+
+        total_our += 1
+
+        # Проверяем все стратегии
+        for strategy_func in (strategy_xg, strategy_shots, strategy_corners,
+                              strategy_attacks, strategy_combo):
+            strat = strategy_func(p)
+            if not strat:
+                continue
+            if try_send_signal(p, strat, now_ts):
+                total_signals += 1
+                break  # одна стратегия сработала — хватит
+
+    print(f"✅ {total_our} наших, {total_signals} сигналов, "
+          f"{total_drops} дропов, pending: {len(pending_checks)}", flush=True)
+
+    # Чистим старое
+    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v < 3600}
+
+# =====================================================================
+# MAIN
+# =====================================================================
+def main():
+    print("🚀 БОТ ЗАПУЩЕН", flush=True)
+    print(f"📋 Лиг: {len(LEAGUE_IDS)}", flush=True)
+    print(f"🎯 Стратегий: 6 (xG, Удары, Углы, Дроп, Атаки, Комбо)", flush=True)
+    print(f"⏸️ Пауза после гола: {GOAL_COOLDOWN_SEC // 60} мин", flush=True)
+    print(f"🚫 Ничья (кроме 0:0) — пропуск", flush=True)
+    print("=" * 60, flush=True)
+
+    while True:
+        try:
+            now_str = datetime.now(MOSCOW_TZ).strftime('%H:%M')
+            if not is_active_time():
+                print(f"😴 Ночь ({now_str})", flush=True)
+                time.sleep(600)
+                continue
+
+            refresh_schedule_if_needed()
+
+            if is_match_time():
+                monitor()
+                check_pending_results()
+                time.sleep(UPDATE_INTERVAL)
+            else:
+                print(f"💤 Матчей нет ({now_str})", flush=True)
+                check_pending_results()
+                time.sleep(600)
+
+        except KeyboardInterrupt:
+            print("⏹️", flush=True)
+            break
+        except Exception as e:
+            print(f"❌ {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            time.sleep(30)
+
+if __name__ == "__main__":
+    main()
