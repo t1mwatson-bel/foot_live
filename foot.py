@@ -65,6 +65,7 @@ S6_MIN_ODD       = 1.4
 DROP_PCT      = -10.0
 DROP_WINDOW   = 180
 DROP_ANTISPAM = 900
+ENABLE_1X2_DROP = False  # Цель OLD — следующий гол, поэтому отдельные ставки по дропу отключены.
 
 # Общие
 MAX_MINUTE        = 80
@@ -79,7 +80,7 @@ SCHEDULE_REFRESH_SEC = 3600
 RUSCORE_URL = "https://api-statistics.ruscore.ru/v1/events"
 RUSCORE_PARAMS = {
     "app_id": "ruscore",
-    "api_key": "yAUBmZp9XJgh3US6bN1GZKtAYsFRKET6",
+    "api_key": os.getenv("RUSCORE_API_KEY", ""),
     "lang": "ru",
     "tz": "Europe/Moscow"
 }
@@ -88,9 +89,10 @@ RUSCORE_LEAGUES_FILTER = [
     "россии", "рпл", "лига чемпионов", "лига европы", "лига конференций",
 ]
 
-CHECK_FIRST_AFTER  = 1800
-CHECK_REPEAT_AFTER = 1800
-CHECK_MAX_ATTEMPTS = 4
+CHECK_FIRST_AFTER  = 180
+CHECK_REPEAT_AFTER = 180
+CHECK_MAX_ATTEMPTS = 40
+RESULTS_FILE = os.getenv("FOOTBALL_RESULTS_FILE", "football_results.jsonl")
 
 # =====================================================================
 # ЗАГОЛОВКИ
@@ -111,10 +113,10 @@ HEADERS = {
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
     "x-app-n": "__BETTING_APP__",
-    "x-hd": "3li6mKmIg5PTz2GyMGs8vd22dQHcuhYMxRR+e2T8PWMKD8rRCXsQ9PZUzd0+DiICw+4UGuu6622DymSOgU8y/wm+8LUGmxhDyoQA7IBZzk026xR8NHvlW13dPxN01ZVT6ynO+oIZq7BtjToZcIPK6TSh+paC+hAayBLg/D3p82x7g5sbuQ9Nip3yB2Vak/p/fB5qVui4XFnebDkoFIMhSBA/ehM2g/B/GOfZQon1E2v1GdApeM39i74erqrqTrM9+/HYBUiqEXxrazx02w==",
+    "x-hd": os.getenv("LIVE_X_HD", ""),
     "x-requested-with": "XMLHttpRequest",
     "x-svc-source": "__BETTING_APP__",
-    "Cookie": "platform_type=desktop; auid=ua+l62qti/C6vzE7AxyDAg==; lng=ru; cookies_agree_type=3; tzo=3; is12h=0; fatman_uuid=6130f537-4410-1609-a97d-d8e42c9bd207; che_g=56f6092d-82cb-434a-aeac-681011664974; referral_values=%7B%22type%22%3A%22reflinkid%22%2C%22val%22%3A%22d_3837289m_1599c_%22%2C%22additional%22%3A%7B%22name_tag%22%3A%22tag%22%7D%7D; reflinkid=d_3837289m_1599c_; SESSION=a0b5dfe7c481dc01770a3b152bf27652; sh.session.id=f6faa86a-0670-459e-8327-f11ca865b071; _ga=GA1.1.1249863541.1789758468; window_width=1091; _ga_7JGWL9SV66=GS2.1.s1789758468$o1$g1$t1789759197$j15$l0$h1289626781",
+    "Cookie": os.getenv("LIVE_API_COOKIE", ""),
 }
 
 RUSCORE_HEADERS = {
@@ -131,6 +133,10 @@ RUSCORE_HEADERS = {
     "sec-fetch-site": "same-site",
 }
 
+if not os.getenv("RUSCORE_API_KEY"):
+    print("⚠️ Не задан RUSCORE_API_KEY: расписание и проверка итогов через Ruscore не заработают.", flush=True)
+if not os.getenv("LIVE_API_COOKIE") or not os.getenv("LIVE_X_HD"):
+    print("⚠️ Проверь LIVE_API_COOKIE и LIVE_X_HD: они могут требоваться live API.", flush=True)
 print("✅ Настройки загружены", flush=True)
 
 # =====================================================================
@@ -143,6 +149,16 @@ odds_history = {}        # {gid: deque([{ts, odds}, ...])}
 sent_drops = {}          # {gid: ts}
 schedule_windows = []
 schedule_updated_at = None
+recent_snapshots = {}    # {game_id: deque([{"ts": ..., "p": {...}}, ...])}
+
+
+def log_result_record(record):
+    """Сохраняет сигналы и результаты в JSONL для честного подсчёта статистики."""
+    try:
+        with open(RESULTS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        print(f"⚠️ Не удалось записать {RESULTS_FILE}: {e}", flush=True)
 
 # =====================================================================
 # ВРЕМЯ
@@ -214,19 +230,25 @@ def get_1x2_odds(game):
     return odds
 
 def get_odd_total(game, total_goals):
-    """Кэф на ТБ (total+0.5) — для value-фильтра стратегий."""
-    target = total_goals + 0.5
+    """Возвращает числовой коэффициент ТБ на следующий гол (текущий тотал + 0.5)."""
+    target = float(total_goals) + 0.5
     for grp in (game.get("centralBlockEventGroups") or []):
-        if grp.get("groupId") != 17:
+        if not isinstance(grp, dict) or grp.get("groupId") != 17:
             continue
         events = grp.get("events") or []
-        if len(events) < 2:
-            continue
-        tb_list = events[0] if isinstance(events[0], list) else []
-        for item in tb_list:
-            if (isinstance(item, dict) and item.get("parameter") == target
-                    and item.get("type") == 9):
-                return item.get("cf")
+        for event_list in events:
+            if not isinstance(event_list, list):
+                continue
+            for item in event_list:
+                if not isinstance(item, dict) or item.get("type") != 9:
+                    continue
+                try:
+                    parameter = float(item.get("parameter"))
+                    odd = float(item.get("cf"))
+                except (TypeError, ValueError):
+                    continue
+                if abs(parameter - target) < 0.001 and odd > 1.0:
+                    return odd
     return None
 
 # =====================================================================
@@ -412,18 +434,77 @@ def parse_game(game):
 # =====================================================================
 # ОБЩИЕ ФИЛЬТРЫ
 # =====================================================================
+def update_match_history(p, now_ts):
+    """Сохраняет недавние снимки матча в памяти для оценки темпа."""
+    gid = p.get("game_id")
+    if gid is None:
+        return
+    hist = recent_snapshots.setdefault(gid, deque(maxlen=20))
+    snapshot = {
+        "ts": now_ts, "minute": p["minute"], "score": p["score"],
+        "xg1": p["xg1"], "xg2": p["xg2"],
+        "shots_on1": p["shots_on1"], "shots_on2": p["shots_on2"],
+        "shots_all1": p["shots_all1"], "shots_all2": p["shots_all2"],
+        "corners1": p["corners1"], "corners2": p["corners2"],
+        "att1": p["att1"], "att2": p["att2"],
+    }
+    if hist and hist[-1]["ts"] == now_ts:
+        hist[-1] = snapshot
+    else:
+        hist.append(snapshot)
+    while hist and now_ts - hist[0]["ts"] > 900:
+        hist.popleft()
+
+    for old_gid in list(recent_snapshots):
+        old_hist = recent_snapshots[old_gid]
+        if not old_hist or now_ts - old_hist[-1]["ts"] > 7200:
+            del recent_snapshots[old_gid]
+
+    reference = None
+    for item in hist:
+        age = now_ts - item["ts"]
+        if 300 <= age <= 900:
+            reference = item
+            break
+    trend = {"available": False, "xg_delta": 0.0, "shots_on_delta": 0,
+             "shots_delta": 0, "corners_delta": 0, "attacks_delta": 0}
+    if reference:
+        trend = {
+            "available": True,
+            "xg_delta": round((p["xg1"] + p["xg2"]) - (reference["xg1"] + reference["xg2"]), 3),
+            "shots_on_delta": (p["shots_on1"] + p["shots_on2"]) - (reference["shots_on1"] + reference["shots_on2"]),
+            "shots_delta": (p["shots_all1"] + p["shots_all2"]) - (reference["shots_all1"] + reference["shots_all2"]),
+            "corners_delta": (p["corners1"] + p["corners2"]) - (reference["corners1"] + reference["corners2"]),
+            "attacks_delta": (p["att1"] + p["att2"]) - (reference["att1"] + reference["att2"]),
+        }
+    p["trend"] = trend
+
+
+def has_real_threat(p):
+    """Не позволяет опасным атакам/углам быть единственным основанием сигнала."""
+    total_xg = p["xg1"] + p["xg2"]
+    total_sot = p["shots_on1"] + p["shots_on2"]
+    total_shots = p["shots_all1"] + p["shots_all2"]
+    trend = p.get("trend", {})
+    recent_pressure = trend.get("available") and (
+        trend.get("xg_delta", 0) >= 0.15 or trend.get("shots_on_delta", 0) >= 1
+        or trend.get("shots_delta", 0) >= 3
+    )
+    return total_xg >= 0.70 or total_sot >= 3 or total_shots >= 8 or recent_pressure
+
+
 def common_ok(p, gid, now_ts):
-    if p["s1"] == p["s2"] and p["s1"] != 0:
-        return False
     if p["minute"] > MAX_MINUTE:
         return False
-    prev = last_scores.get(gid, {})
-    if prev.get("score") and prev["score"] != p["score"]:
+    prev = last_scores.get(gid)
+    if prev is None:
+        last_scores[gid] = {"score": p["score"], "changed_at": 0}
+    elif prev.get("score") != p["score"]:
         last_scores[gid] = {"score": p["score"], "changed_at": now_ts}
         return False
-    if prev.get("changed_at"):
-        if now_ts - prev["changed_at"] < GOAL_COOLDOWN_SEC:
-            return False
+    changed_at = last_scores.get(gid, {}).get("changed_at", 0)
+    if changed_at and now_ts - changed_at < GOAL_COOLDOWN_SEC:
+        return False
     return True
 
 # =====================================================================
@@ -462,6 +543,8 @@ def strategy_corners(p):
     att_diff = abs(p["att1"] - p["att2"])
     if corners_diff < S3_CORNERS_DIFF or att_diff < S3_ATT_DIFF:
         return None
+    if not has_real_threat(p):
+        return None
     side = "home" if p["corners1"] > p["corners2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
     if red_side > 0:
@@ -474,6 +557,8 @@ def strategy_corners(p):
 def strategy_attacks(p):
     att_diff = abs(p["att1"] - p["att2"])
     if att_diff < S5_ATT_DIFF:
+        return None
+    if not has_real_threat(p):
         return None
     side = "home" if p["att1"] > p["att2"] else "away"
     red_side = p["red1"] if side == "home" else p["red2"]
@@ -533,6 +618,33 @@ def format_signal(p, strategy, odd):
         f"💡 <b>Ожидается гол — ТБ {tb1} / ТБ {tb2}</b>"
     )
 
+def format_signal_multi(p, strategies, odd):
+    """Обновляет сигнал, не теряя исходные данные и список подтверждений."""
+    total = p["s1"] + p["s2"]
+    tb1, tb2 = total + 0.5, total + 1.5
+    trend = p.get("trend", {})
+    if trend.get("available"):
+        trend_line = (f"📈 За 5–10 мин: xG +{trend['xg_delta']:.2f}, "
+                      f"удары в створ +{trend['shots_on_delta']}, "
+                      f"удары +{trend['shots_delta']}\n")
+    else:
+        trend_line = "📈 Динамика: собирается история\n"
+    odd_line = f"💰 Кэф ТБ {tb1}: <b>{odd:.2f}</b>" if odd is not None else "💰 Кэф: недоступен"
+    return (
+        f"🎯 <b>СИГНАЛ OLD — следующий гол до конца матча</b>\n"
+        f"{p['league']}\n⚽ <b>{p['match']}</b>\n"
+        f"📊 Счёт: <b>{p['score']}</b> | ⏱ {p['minute']}'\n"
+        f"🎯 xG: {p['xg1']:.2f} — {p['xg2']:.2f}\n"
+        f"🥅 Удары: {p['shots_all1']} — {p['shots_all2']} "
+        f"(в створ {p['shots_on1']} — {p['shots_on2']})\n"
+        f"⚔️ Опасные атаки: {p['att1']} — {p['att2']}\n"
+        f"🚩 Углы: {p['corners1']} — {p['corners2']}\n"
+        f"{trend_line}{odd_line}\n"
+        f"🧠 Фильтры: {', '.join(strategies)}\n"
+        f"💡 Цель: хотя бы один гол до финального свистка; это оценка, не гарантия."
+    )
+
+
 # =====================================================================
 # RUSCORE
 # =====================================================================
@@ -582,6 +694,21 @@ def parse_score_from_ruscore(ev):
                 return None, None
     return None, None
 
+def parse_score_for_match(ev, team1, team2):
+    """Возвращает счёт в порядке команд, как они записаны в сигнале OLD."""
+    h_score, a_score = parse_score_from_ruscore(ev)
+    if h_score is None or a_score is None:
+        return None, None
+    home = normalize_name((ev.get("home") or {}).get("name", ""))
+    away = normalize_name((ev.get("away") or {}).get("name", ""))
+    n1, n2 = normalize_name(team1), normalize_name(team2)
+    if (n1 in home or home in n1) and (n2 in away or away in n2):
+        return h_score, a_score
+    if (n1 in away or away in n1) and (n2 in home or home in n2):
+        return a_score, h_score
+    return None, None
+
+
 def check_pending_results():
     global pending_checks
     if not pending_checks:
@@ -617,15 +744,15 @@ def check_pending_results():
                     del pending_checks[k]
                 continue
 
-            h_score, a_score = parse_score_from_ruscore(ev)
-            status = (ev.get("status") or {}).get("label", "")
+            h_score, a_score = parse_score_for_match(ev, info["team1"], info["team2"])
+            status = str((ev.get("status") or {}).get("label", "")).lower()
 
             if h_score is None:
                 info["check_after"] = now + CHECK_REPEAT_AFTER
                 continue
 
-            goal = (h_score != info["old_s1"]) or (a_score != info["old_s2"])
-            finished = status in ("finished", "ended")
+            goal = (h_score > info["old_s1"]) or (a_score > info["old_s2"])
+            finished = status in ("finished", "ended", "завершен", "завершён", "матч завершен", "матч завершён")
 
             if goal:
                 elapsed = (now - info["signal_ts"]) // 60
@@ -634,6 +761,11 @@ def check_pending_results():
                         f"📊 Стало: {h_score}-{a_score}\n"
                         f"⏱ ~{elapsed} мин")
                 edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                log_result_record({"record_type": "result", "game_id": k, "timestamp": now,
+                                   "match": info["match"], "strategy": info["strategy"],
+                                   "odd": info.get("odd"), "outcome": "hit",
+                                   "signal_score": info.get("signal_score"),
+                                   "final_score": f"{h_score}-{a_score}"})
                 print(f"✅ {info['match']} [{info['strategy']}]", flush=True)
                 del pending_checks[k]
                 continue
@@ -641,6 +773,11 @@ def check_pending_results():
             if finished:
                 line = f"❌ <b>НЕ ЗАШЛО</b>\n📊 Итог: {h_score}-{a_score}"
                 edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                log_result_record({"record_type": "result", "game_id": k, "timestamp": now,
+                                   "match": info["match"], "strategy": info["strategy"],
+                                   "odd": info.get("odd"), "outcome": "miss",
+                                   "signal_score": info.get("signal_score"),
+                                   "final_score": f"{h_score}-{a_score}"})
                 print(f"❌ {info['match']} [{info['strategy']}]", flush=True)
                 del pending_checks[k]
                 continue
@@ -725,15 +862,22 @@ def try_send_signal(p, strategy, now_ts):
 
     odd = get_odd_total(p_game_cache.get(gid, {}), p["s1"] + p["s2"])
 
-    if odd is not None and odd < strategy["min_odd"]:
-        print(f"    💸 Пропуск {p['match']} [{strategy['strategy']}] — кэф {odd}", flush=True)
+    if odd is None:
+        print(f"    💸 Пропуск {p['match']} [{strategy['strategy']}] — коэффициент ТБ не найден в API", flush=True)
+        return False
+    try:
+        odd = float(odd)
+    except (TypeError, ValueError):
+        return False
+    if odd < strategy["min_odd"]:
+        print(f"    💸 Пропуск {p['match']} [{strategy['strategy']}] — кэф {odd:.2f}", flush=True)
         return False
 
     existing = sent_signals.get(key)
 
     # ===== ПЕРВЫЙ СИГНАЛ ПО МАТЧУ =====
     if not existing:
-        text = format_signal(p, strategy, odd)
+        text = format_signal_multi(p, [f"{strategy['emoji']} {strategy['strategy']}"], odd)
         msg_id = send_telegram(text)
         if not msg_id:
             return False
@@ -745,7 +889,19 @@ def try_send_signal(p, strategy, now_ts):
             "strategies": [f"{strategy['emoji']} {strategy['strategy']}"],
             "last_p": p,
         }
-        print(f"    📤 {p['match']} | {strategy['emoji']} {strategy['strategy']} | кэф {odd}", flush=True)
+        print(f"    📤 {p['match']} | {strategy['emoji']} {strategy['strategy']} | кэф {odd:.2f}", flush=True)
+        log_result_record({
+            "record_type": "signal", "game_id": gid, "timestamp": now_ts,
+            "date_moscow": datetime.now(MOSCOW_TZ).isoformat(),
+            "match": p["match"], "league": p["league"], "minute": p["minute"],
+            "score": p["score"], "strategy": strategy["strategy"], "odd": odd,
+            "xg1": p["xg1"], "xg2": p["xg2"],
+            "shots_on1": p["shots_on1"], "shots_on2": p["shots_on2"],
+            "shots_all1": p["shots_all1"], "shots_all2": p["shots_all2"],
+            "att1": p["att1"], "att2": p["att2"],
+            "corners1": p["corners1"], "corners2": p["corners2"],
+            "trend": p.get("trend", {}),
+        })
 
         today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
         pending_checks[key] = {
@@ -755,68 +911,18 @@ def try_send_signal(p, strategy, now_ts):
             "minute": p["minute"], "signal_ts": now_ts,
             "message_id": msg_id, "base_text": text,
             "strategy": strategy["strategy"],
+            "odd": odd,
+            "signal_score": p["score"],
             "check_after": now_ts + CHECK_FIRST_AFTER,
             "attempts": 0,
         }
         time.sleep(1)
         return True
 
-    # ===== МАТЧ УЖЕ В СИГНАЛАХ =====
-    full_name = f"{strategy['emoji']} {strategy['strategy']}"
-
-    if full_name in existing["strategies"]:
+    # Один прогноз на матч: повторный сигнал перезаписал бы контроль результата первого.
+    if existing:
         return False
-
-    if (now_ts - existing["ts"]) > ANTISPAM_SEC:
-        del sent_signals[key]
-        return try_send_signal(p, strategy, now_ts)
-
-    # ===== ДОБАВЛЯЕМ СТРАТЕГИЮ В СУЩЕСТВУЮЩЕЕ СООБЩЕНИЕ =====
-    existing["strategies"].append(full_name)
-    existing["ts"] = now_ts
-    existing["last_p"] = p
-
-    new_text = format_signal_multi(p, existing["strategies"], odd)
-    edit_telegram(existing["message_id"], new_text)
-    existing["base_text"] = new_text
-
-    if key in pending_checks:
-        pending_checks[key]["base_text"] = new_text
-
-    print(f"    ✏️ {p['match']} | + {full_name} "
-          f"(всего: {len(existing['strategies'])})", flush=True)
-    time.sleep(1)
-    return True
-
-    # ===== МАТЧ УЖЕ В СИГНАЛАХ =====
-    full_name = f"{strategy['emoji']} {strategy['strategy']}"
-
-    # Эта стратегия уже подтвердила — пропуск
-    if full_name in existing["strategies"]:
-        return False
-
-    # Прошло много времени — старый удаляем, новый отправляем
-    if (now_ts - existing["ts"]) > ANTISPAM_SEC:
-        del sent_signals[key]
-        return try_send_signal(p, strategy, now_ts)
-
-    # ===== ДОБАВЛЯЕМ СТРАТЕГИЮ В СУЩЕСТВУЮЩЕЕ СООБЩЕНИЕ =====
-    existing["strategies"].append(full_name)
-    existing["ts"] = now_ts
-    existing["last_p"] = p
-
-    new_text = format_signal_multi(p, existing["strategies"], odd)
-    edit_telegram(existing["message_id"], new_text)
-    existing["base_text"] = new_text
-
-    # Обновляем pending (свежие данные)
-    if key in pending_checks:
-        pending_checks[key]["base_text"] = new_text
-
-    print(f"    ✏️ {p['match']} | + {full_name} "
-          f"(всего: {len(existing['strategies'])})", flush=True)
-    time.sleep(1)
-    return True
+    return False
 
 p_game_cache = {}
 
@@ -854,12 +960,13 @@ def monitor():
             continue
 
         gid = p["game_id"]
+        update_match_history(p, now_ts)
 
         # =============================================================
         # ДРОП 1X2 — отдельный модуль (работает ВСЕГДА, независимо)
         # =============================================================
         odds_1x2 = get_1x2_odds(game)
-        if odds_1x2:
+        if ENABLE_1X2_DROP and odds_1x2:
             save_odds(gid, now_ts, odds_1x2)
 
             drops = check_drops(gid, now_ts)
@@ -894,7 +1001,7 @@ def monitor():
     print(f"✅ {total_our} наших, {total_signals} сигналов, "
           f"{total_drops} дропов, pending: {len(pending_checks)}", flush=True)
 
-    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v["ts"] < 3600}
+    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v["ts"] < 14400}
     sent_drops = {k: v for k, v in sent_drops.items() if now_ts - v < 3600}
 
 # =====================================================================
@@ -904,7 +1011,7 @@ def main():
     print("🚀 БОТ ЗАПУЩЕН", flush=True)
     print(f"📋 Лиг: {len(LEAGUE_IDS)}", flush=True)
     print(f"🎯 Стратегии: xG, Удары, Углы, Атаки, Комбо", flush=True)
-    print(f"📉 Дроп 1X2 (П1/X/П2): {DROP_PCT}% за {DROP_WINDOW}с", flush=True)
+    print(f"🎯 Цель: хотя бы один гол до конца матча; отдельный дроп 1X2: {'включён' if ENABLE_1X2_DROP else 'отключён'}", flush=True)
     print(f"⏸️ Пауза после гола: {GOAL_COOLDOWN_SEC // 60} мин", flush=True)
     print(f"🚫 Ничья (кроме 0:0) — пропуск", flush=True)
     print("=" * 60, flush=True)
