@@ -894,7 +894,7 @@ def monitor():
     print(f"✅ {total_our} наших, {total_signals} сигналов, "
           f"{total_drops} дропов, pending: {len(pending_checks)}", flush=True)
 
-    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v < 3600}
+    sent_signals = {k: v for k, v in sent_signals.items() if now_ts - v["ts"] < 3600}
     sent_drops = {k: v for k, v in sent_drops.items() if now_ts - v < 3600}
 
 # =====================================================================
