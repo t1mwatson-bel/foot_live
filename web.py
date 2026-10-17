@@ -43,7 +43,7 @@ HTML_TEMPLATE = """
             z-index: -1;
         }
         
-        .container { max-width: 1400px; margin: auto; }
+        .container { max-width: 1400px; margin: auto; padding-top: 120px; }
         .header { text-align: center; margin-bottom: 30px; }
         .logo { font-size: 32px; font-weight: 900; letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 200, 255, .6); }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px; }
