@@ -19,17 +19,48 @@ schedule_updated_at = None
 
 def get_live_games():
     try:
-        r = requests.get(f"{BASE_URL}/service-api/main-live-feed/v3/games1x2", headers=HEADERS, params={"cfView": 3, "count": 40, "fcountry": 1, "gr": 2336, "grMode": 4, "lng": "ru", "ref": 1}, timeout=15)
-        return [g for g in r.json() if isinstance(g, dict)] if r.status_code == 200 else []
-    except: return []
+        url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
+        params = {"cfView": 3, "count": 40, "fcountry": 1, "gr": 2336, "grMode": 4, "lng": "ru", "ref": 1}
+        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        
+        # 🔥 ОТЛАДКА: Что нам ответил 1xlite?
+        print(f"   🔎 1xlite HTTP: {r.status_code}", flush=True)
+        if r.status_code != 200:
+            print(f"   ❌ Ошибка 1xlite: {r.text[:100]}", flush=True)
+            return []
+
+        data = r.json()
+        if not isinstance(data, list):
+            print(f"   ❌ 1xlite вернул не список, а: {type(data)}", flush=True)
+            return []
+            
+        print(f"   📊 1xlite вернул матчей: {len(data)}", flush=True)
+        return [g for g in data if isinstance(g, dict)]
+    except Exception as e:
+        print(f"   ❌ Исключение при запросе к 1xlite: {e}", flush=True)
+        return []
 
 def monitor():
     global p_game_cache, sent_signals, pending_checks, last_scores, recent_snapshots
     games = get_live_games()
-    if not games: return
+    if not games: 
+        return
+    
     now_ts = int(time.time())
     p_game_cache = {g.get("id"): g for g in games if isinstance(g, dict)}
     
+    found_leagues = {}
+    for game in games:
+        lid = (game.get("liga") or {}).get("id")
+        if lid in LEAGUE_IDS:
+            found_leagues[lid] = found_leagues.get(lid, 0) + 1
+
+    if found_leagues:
+        for lid, cnt in found_leagues.items():
+            print(f"   🏆 {LEAGUE_IDS[lid]}: {cnt}", flush=True)
+    else:
+        print(f"   ⚠️ Матчи есть, но ни один не попал в LEAGUE_IDS", flush=True)
+
     for game in games:
         p = parse_game(game)
         if not p: continue
@@ -53,7 +84,6 @@ def refresh_schedule_if_needed():
     schedule_updated_at = now
 
 def is_match_time():
-    # Всегда возвращаем True, чтобы бот не ждал расписание, а сразу шел в 1xlite
     return True
 
 def bot_loop():
@@ -75,14 +105,15 @@ def bot_loop():
                 print(f"😴 Ночь ({now_str})", flush=True)
                 time.sleep(600)
         except Exception as e:
-            print(f"❌ {e}", flush=True); time.sleep(30)
+            print(f"❌ Ошибка в bot_loop: {e}", flush=True)
+            time.sleep(30)
 
 def run_web():
     """Запускает Flask-сайт в фоне на порту 3000."""
     web.app.run(host='0.0.0.0', port=3000, use_reloader=False)
 
 if __name__ == "__main__":
-    # 🔥 ВАЖНО: Создаем таблицы в БД перед запуском
+    # Создаем таблицы в БД перед запуском
     import database as db
     db.init_db()
     
