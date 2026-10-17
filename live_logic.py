@@ -5,7 +5,7 @@ from config import *
 from telegram_bot import send_telegram, edit_telegram, format_with_result
 from stats_parser import *
 from ruscore import fetch_ruscore_events, find_match, parse_score_for_match
-import database as db # 🔥 ДОБАВИЛИ ИМПОРТ БАЗЫ
+import database as db 
 
 def log_result_record(record):
     try:
@@ -36,19 +36,31 @@ def check_pending_results(pending_checks):
             h_score, a_score = parse_score_for_match(ev, info["team1"], info["team2"])
             status = str((ev.get("status") or {}).get("label", "")).lower()
             if h_score is None: info["check_after"] = now + CHECK_REPEAT_AFTER; continue
+            
             goal = (h_score > info["old_s1"]) or (a_score > info["old_s2"])
             finished = status in ("finished", "ended", "завершен", "завершён", "матч завершен", "матч завершён")
+            
             if goal:
                 elapsed = (now - info["signal_ts"]) // 60
                 line = f"✅ <b>ЗАШЛО</b>\n📊 Было: {info['old_s1']}-{info['old_s2']} ({info['minute']}')\n📊 Стало: {h_score}-{a_score}\n⏱ ~{elapsed} мин"
                 edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                
+                # 🔥 ОБНОВЛЯЕМ СТАТУС НА САЙТЕ (WIN)
+                db.update_live_result(k, True)
+                
                 log_result_record({"record_type": "result", "game_id": k, "timestamp": now, "match": info["match"], "strategy": info["strategy"], "odd": info.get("odd"), "outcome": "hit", "final_score": f"{h_score}-{a_score}"})
                 print(f"✅ {info['match']} [{info['strategy']}]", flush=True); del pending_checks[k]; continue
+                
             if finished:
                 line = f"❌ <b>НЕ ЗАШЛО</b>\n📊 Итог: {h_score}-{a_score}"
                 edit_telegram(info["message_id"], format_with_result(info["base_text"], line))
+                
+                # 🔥 ОБНОВЛЯЕМ СТАТУС НА САЙТЕ (LOSE)
+                db.update_live_result(k, False)
+                
                 log_result_record({"record_type": "result", "game_id": k, "timestamp": now, "match": info["match"], "strategy": info["strategy"], "odd": info.get("odd"), "outcome": "miss", "final_score": f"{h_score}-{a_score}"})
                 print(f"❌ {info['match']} [{info['strategy']}]", flush=True); del pending_checks[k]; continue
+                
             info["attempts"] = info.get("attempts", 0) + 1; info["check_after"] = now + CHECK_REPEAT_AFTER
             if info["attempts"] >= CHECK_MAX_ATTEMPTS:
                 edit_telegram(info["message_id"], format_with_result(info["base_text"], f"⏱ <b>БЕЗ РЕЗУЛЬТАТА</b> ({h_score}-{a_score})"))
@@ -68,7 +80,6 @@ def format_signal_multi(p, strategies, odd):
 def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_checks):
     gid, key = p["game_id"], str(p["game_id"])
     
-    # 1. Проверка: если уже отправляли сигнал (защита от перезапуска)
     if db.is_live_signal_sent(gid):
         return False
 
@@ -84,7 +95,6 @@ def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_che
         msg_id = send_telegram(text)
         if not msg_id: return False
         
-        # 🔥 СОХРАНЯЕМ В БАЗУ, ЧТОБЫ САЙТ УВИДЕЛ
         db.save_live_signal({
             "game_id": gid,
             "match": p["match"],
