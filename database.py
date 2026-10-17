@@ -86,7 +86,6 @@ def save_signal(data):
         conn.close()
 
 def save_live_signal(data):
-    """Сохраняет лайв-сигнал в БД."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
@@ -111,7 +110,6 @@ def save_live_signal(data):
         return False
     finally:
         conn.close()
-
 def get_all_signals():
     """Возвращает все прематч-сигналы для сайта."""
     conn = sqlite3.connect(DB_PATH)
