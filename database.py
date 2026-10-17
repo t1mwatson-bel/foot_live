@@ -31,7 +31,7 @@ def init_db():
         )
     ''')
     
-    # Таблица для лайв-сигналов (чтобы сайт их тоже видел)
+    # Таблица для лайв-сигналов
     c.execute('''
         CREATE TABLE IF NOT EXISTS live_signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +86,7 @@ def save_signal(data):
         conn.close()
 
 def save_live_signal(data):
+    """Сохраняет лайв-сигнал."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
@@ -110,6 +111,28 @@ def save_live_signal(data):
         return False
     finally:
         conn.close()
+
+def is_live_signal_sent(game_id):
+    """Проверяет, был ли уже сигнал по этому матчу (защита от перезапусков)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM live_signals WHERE game_id = ?", (str(game_id),))
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
+
+def mark_live_signal_sent(game_id):
+    """Ставит заглушку (для обратной совместимости)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT OR IGNORE INTO live_signals (game_id, sent_at) VALUES (?, ?)", 
+                  (str(game_id), int(datetime.now().timestamp())))
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+
 def get_all_signals():
     """Возвращает все прематч-сигналы для сайта."""
     conn = sqlite3.connect(DB_PATH)
@@ -131,7 +154,7 @@ def get_live_signals():
     return [dict(r) for r in rows]
 
 def get_pending_signals():
-    """Возвращает сигналы, которые еще не проверены."""
+    """Возвращает прематч-сигналы, которые еще не проверены."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -140,27 +163,42 @@ def get_pending_signals():
     conn.close()
     return [dict(r) for r in rows]
 
+def get_pending_live_signals():
+    """Возвращает лайв-сигналы, которые еще не проверены."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM live_signals WHERE status = 'PENDING'")
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 def update_result(match_slug, goals_total):
-    """Обновляет результат матча. Если голов > 2.5, то WIN."""
+    """Обновляет результат прематч-матча."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
     status = 'WIN' if goals_total > 2.5 else 'LOSE'
-    
     c.execute("SELECT odds FROM signals WHERE match_slug = ? AND status = 'PENDING'", (match_slug,))
     row = c.fetchone()
-    
     if row:
         odds = row[0]
         profit = (odds - 1.0) if status == 'WIN' else -1.0
-        
-        c.execute('''
-            UPDATE signals 
-            SET status = ?, profit = ?
-            WHERE match_slug = ? AND status = 'PENDING'
-        ''', (status, profit, match_slug))
+        c.execute('UPDATE signals SET status = ?, profit = ? WHERE match_slug = ? AND status = "PENDING"', (status, profit, match_slug))
         conn.commit()
-        
+    conn.close()
+
+def update_live_result(game_id, is_goal_scored):
+    """Обновляет результат лайв-матча (зашел ли следующий гол)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    status = 'WIN' if is_goal_scored else 'LOSE'
+    c.execute("SELECT odds FROM live_signals WHERE game_id = ? AND status = 'PENDING'", (str(game_id),))
+    row = c.fetchone()
+    if row:
+        odds = row[0]
+        profit = (odds - 1.0) if status == 'WIN' else -1.0
+        c.execute('UPDATE live_signals SET status = ?, profit = ? WHERE game_id = ? AND status = "PENDING"', (status, profit, str(game_id)))
+        conn.commit()
     conn.close()
 
 def get_stats():
