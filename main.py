@@ -1,11 +1,13 @@
 import time
+import threading
 from datetime import datetime
 from config import *
 from telegram_bot import send_telegram
-from stats_parser import parse_game, update_match_history, common_ok, strategy_xg, strategy_shots, strategy_corners, strategy_attacks, strategy_combo, get_1x2_odds
+from stats_parser import parse_game, update_match_history, common_ok, strategy_xg, strategy_shots, strategy_corners, strategy_attacks, strategy_combo
 from live_logic import check_pending_results, try_send_signal
 from ruscore import get_today_schedule, get_windows
 import requests
+import web  # 🔥 Импортируем наш сайт
 
 p_game_cache = {}
 sent_signals = {}
@@ -55,7 +57,7 @@ def is_match_time():
     now = datetime.now(MOSCOW_TZ)
     return any(s <= now <= e for s, e in schedule_windows)
 
-def main():
+def bot_loop():
     print("🚀 LIVE-БОТ ЗАПУЩЕН", flush=True)
     while True:
         try:
@@ -76,5 +78,14 @@ def main():
         except Exception as e:
             print(f"❌ {e}", flush=True); time.sleep(30)
 
+def run_web():
+    """Запускает Flask-сайт в фоне на порту 3000."""
+    web.app.run(host='0.0.0.0', port=3000, use_reloader=False)
+
 if __name__ == "__main__":
-    main()
+    # 1. Запускаем сайт в фоновом потоке
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+    
+    # 2. Запускаем лайв-бота в основном потоке
+    bot_loop()
