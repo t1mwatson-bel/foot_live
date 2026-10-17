@@ -2,7 +2,7 @@ import sqlite3
 import os
 from datetime import datetime
 
-DATA_DIR = os.getenv('DATA_DIR', '/app/data')
+DATA_DIR = os.getenv('DATA_DIR', '/app')
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, 'bot_stats.db')
 
