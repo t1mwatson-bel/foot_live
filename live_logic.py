@@ -1,9 +1,11 @@
 import time
+import json
 from datetime import datetime
 from config import *
 from telegram_bot import send_telegram, edit_telegram, format_with_result
 from stats_parser import *
 from ruscore import fetch_ruscore_events, find_match, parse_score_for_match
+import database as db # 🔥 ДОБАВИЛИ ИМПОРТ БАЗЫ
 
 def log_result_record(record):
     try:
@@ -65,16 +67,35 @@ def format_signal_multi(p, strategies, odd):
 
 def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_checks):
     gid, key = p["game_id"], str(p["game_id"])
+    
+    # 1. Проверка: если уже отправляли сигнал (защита от перезапуска)
+    if db.is_live_signal_sent(gid):
+        return False
+
     odd = get_odd_total(p_game_cache.get(gid, {}), p["s1"] + p["s2"])
     if odd is None: return False
     try: odd = float(odd)
     except: return False
     if odd < strategy["min_odd"]: return False
+    
     existing = sent_signals.get(key)
     if not existing:
         text = format_signal_multi(p, [f"{strategy['emoji']} {strategy['strategy']}"], odd)
         msg_id = send_telegram(text)
         if not msg_id: return False
+        
+        # 🔥 СОХРАНЯЕМ В БАЗУ, ЧТОБЫ САЙТ УВИДЕЛ
+        db.save_live_signal({
+            "game_id": gid,
+            "match": p["match"],
+            "league": p["league"],
+            "minute": p["minute"],
+            "score": p["score"],
+            "strategy": strategy["strategy"],
+            "dominant": strategy["dominant"],
+            "odds": odd
+        })
+        
         sent_signals[key] = {"ts": now_ts, "message_id": msg_id, "base_text": text, "strategies": [f"{strategy['emoji']} {strategy['strategy']}"], "last_p": p}
         log_result_record({"record_type": "signal", "game_id": gid, "timestamp": now_ts, "match": p["match"], "league": p["league"], "strategy": strategy["strategy"], "odd": odd})
         today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
