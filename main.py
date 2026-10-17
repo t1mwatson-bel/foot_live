@@ -53,9 +53,8 @@ def refresh_schedule_if_needed():
     schedule_updated_at = now
 
 def is_match_time():
-    if not schedule_windows: return False
-    now = datetime.now(MOSCOW_TZ)
-    return any(s <= now <= e for s, e in schedule_windows)
+    # Всегда возвращаем True, чтобы бот не ждал расписание, а сразу шел в 1xlite
+    return True
 
 def bot_loop():
     print("🚀 LIVE-БОТ ЗАПУЩЕН", flush=True)
