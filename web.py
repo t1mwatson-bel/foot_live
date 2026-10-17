@@ -34,12 +34,12 @@ HTML_TEMPLATE = """
             min-height: 100vh; 
         }
         
-        /* Затемнение, чтобы текст читался */
+                /* Затемнение, чтобы текст читался (сделали чуть прозрачнее) */
         body::before {
             content: "";
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.75);
+            background: rgba(0, 0, 0, 0.5); /* Было 0.75, стало 0.5 */
             z-index: -1;
         }
         
@@ -48,25 +48,29 @@ HTML_TEMPLATE = """
         .logo { font-size: 32px; font-weight: 900; letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 200, 255, .6); }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px; }
         
+        /* КАРТОЧКИ (сделали прозрачными и размытыми) */
         .card { 
-            background: rgba(30, 41, 59, 0.8); 
-            backdrop-filter: blur(8px);
-            border: 1px solid rgba(0, 200, 255, .15); 
+            background: rgba(30, 41, 59, 0.4); /* Прозрачность 40% */
+            backdrop-filter: blur(12px);       /* Эффект матового стекла */
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.15); /* Светлая рамка */
             border-radius: 18px; 
             padding: 22px; 
             text-align: center; 
-            box-shadow: 0 10px 30px rgba(0, 0, 0, .45); 
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); 
         }
-        .card h3 { color: #8995a8; font-size: 13px; margin-bottom: 10px; text-transform: uppercase; }
+        .card h3 { color: #e2e8f0; font-size: 13px; margin-bottom: 10px; text-transform: uppercase; }
         .val { font-size: 32px; font-weight: 800; }
         .green { color: #4cff9b; text-shadow: 0 0 12px rgba(76, 255, 155, .7); }
         .red { color: #ff5d70; text-shadow: 0 0 12px rgba(255, 93, 112, .7); }
         .orange { color: #ffbd66; }
         
+        /* СЕКЦИИ (График и Таблица) */
         .section { 
-            background: rgba(30, 41, 59, 0.8); 
-            backdrop-filter: blur(8px);
-            border: 1px solid rgba(0, 200, 255, .12); 
+            background: rgba(30, 41, 59, 0.4); /* Прозрачность 40% */
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.15); 
             border-radius: 20px; 
             padding: 22px; 
             margin-bottom: 25px; 
