@@ -82,6 +82,10 @@ def run_web():
     web.app.run(host='0.0.0.0', port=3000, use_reloader=False)
 
 if __name__ == "__main__":
+    # 🔥 ВАЖНО: Создаем таблицы в БД перед запуском
+    import database as db
+    db.init_db()
+    
     # 1. Запускаем сайт в фоновом потоке
     web_thread = threading.Thread(target=run_web, daemon=True)
     web_thread.start()
