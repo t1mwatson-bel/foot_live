@@ -457,7 +457,7 @@ else:
         f"{info.get('match')} | итог {final_score}",
         flush=True,
     )
-    return True
+        return True
 
 
 # ============================================================
