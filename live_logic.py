@@ -561,11 +561,211 @@ def _schedule_retry(key, info, now, delay=None):
 
 
 # ============================================================
+# РЕДАКТИРОВАНИЕ И ПОВТОРНОЕ ОБНОВЛЕНИЕ TELEGRAM
+# ============================================================
+
+def _build_result_line(row):
+    """Создаёт строку результата для завершённого сигнала из БД."""
+    status = str(row.get("status") or "")
+    final_score = str(row.get("final_score") or "—")
+
+    old_s1 = row.get("old_s1")
+    old_s2 = row.get("old_s2")
+    minute = row.get("minute") or 0
+
+    if status == "WIN":
+        signal_ts = int(
+            row.get("signal_ts")
+            or row.get("sent_at")
+            or time.time()
+        )
+        result_ts = int(
+            row.get("result_updated_at")
+            or time.time()
+        )
+        elapsed = max(0, (result_ts - signal_ts) // 60)
+
+        return (
+            "✅ <b>ЗАШЛО</b>\n"
+            f"📊 Было: {old_s1 if old_s1 is not None else 0}-"
+            f"{old_s2 if old_s2 is not None else 0} "
+            f"({minute}')\n"
+            f"📊 Стало: {final_score}\n"
+            f"⏱ ~{elapsed} мин"
+        )
+
+    return (
+        "❌ <b>НЕ ЗАШЛО</b>\n"
+        f"📊 Итог: {final_score}\n"
+        "ℹ️ После сигнала новых голов не было."
+    )
+
+
+def _edit_completed_signal(game_id, row, result_text=None):
+    """
+    Пытается обновить сообщение Telegram.
+    При успехе отмечает сообщение в БД; при ошибке планирует повтор.
+    """
+    message_id = row.get("message_id")
+    base_text = row.get("base_text")
+
+    if not message_id or not base_text:
+        print(
+            f"⚠️ Telegram: у сигнала {game_id} нет message_id "
+            "или исходного текста. Повторить редактирование нельзя.",
+            flush=True,
+        )
+        return False
+
+    if not result_text:
+        result_text = row.get("telegram_result_text")
+
+    if not result_text:
+        result_text = format_with_result(
+            base_text,
+            _build_result_line(row),
+        )
+
+        try:
+            db.save_live_telegram_result(game_id, result_text)
+        except Exception as e:
+            print(
+                f"⚠️ Не удалось сохранить текст результата {game_id}: {e}",
+                flush=True,
+            )
+
+    try:
+        edited = edit_telegram(
+            message_id,
+            result_text,
+        )
+    except Exception as e:
+        print(
+            f"❌ Ошибка редактирования Telegram для {game_id}: {e}",
+            flush=True,
+        )
+        edited = False
+
+    if edited:
+        try:
+            db.mark_live_telegram_updated(game_id)
+        except Exception as e:
+            print(
+                f"⚠️ Сообщение {game_id} изменено, "
+                f"но статус обновления не сохранён: {e}",
+                flush=True,
+            )
+            try:
+                db.schedule_live_telegram_retry(game_id, 60)
+            except Exception:
+                pass
+
+        return True
+
+    try:
+        attempts = int(row.get("telegram_edit_attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+
+    # Увеличиваем интервал при многократных ошибках, чтобы
+    # не отправлять запросы в Telegram слишком часто.
+    retry_delay = min(60 * (2 ** min(attempts, 4)), 900)
+
+    try:
+        db.schedule_live_telegram_retry(
+            game_id,
+            delay=retry_delay,
+        )
+    except Exception as e:
+        print(
+            f"❌ Не удалось запланировать повтор Telegram {game_id}: {e}",
+            flush=True,
+        )
+
+    print(
+        f"🔁 Telegram: обновление сигнала {game_id} не удалось. "
+        f"Повтор через {retry_delay} сек.",
+        flush=True,
+    )
+
+    return False
+
+
+def retry_pending_telegram_updates():
+    """
+    Повторно редактирует сообщения завершённых сигналов,
+    если предыдущая попытка Telegram не удалась.
+    Вызывать из основного цикла main.py.
+    """
+    try:
+        rows = db.get_live_telegram_pending()
+    except Exception as e:
+        print(
+            f"❌ Не удалось получить очередь обновлений Telegram: {e}",
+            flush=True,
+        )
+        return
+
+    if not rows:
+        return
+
+    print(
+        f"🔁 Очередь Telegram: сообщений для обновления — {len(rows)}",
+        flush=True,
+    )
+
+    for row in rows:
+        game_id = str(row.get("game_id") or "").strip()
+
+        if not game_id:
+            continue
+
+        try:
+            result_text = row.get("telegram_result_text") or ""
+
+            if not result_text:
+                result_text = format_with_result(
+                    row.get("base_text") or "",
+                    _build_result_line(row),
+                )
+
+                db.save_live_telegram_result(
+                    game_id,
+                    result_text,
+                )
+
+            _edit_completed_signal(
+                game_id,
+                row,
+                result_text=result_text,
+            )
+
+        except Exception as e:
+            print(
+                f"❌ Ошибка повторного обновления Telegram "
+                f"для сигнала {game_id}: {e}",
+                flush=True,
+            )
+
+            try:
+                db.schedule_live_telegram_retry(
+                    game_id,
+                    delay=300,
+                )
+            except Exception as db_error:
+                print(
+                    f"❌ Не удалось запланировать повтор "
+                    f"для {game_id}: {db_error}",
+                    flush=True,
+                )
+
+
+# ============================================================
 # ФИКСАЦИЯ РЕЗУЛЬТАТА
 # ============================================================
 
 def _finish_signal(key, info, won, score1, score2, now):
-    """Сохраняет результат в БД, Telegram и JSONL."""
+    """Сохраняет результат в БД и обновляет сообщение Telegram."""
     final_score = f"{score1}-{score2}"
 
     if won:
@@ -616,9 +816,9 @@ def _finish_signal(key, info, won, score1, score2, now):
         return False
 
     # После подтверждения исхода обновляем обучающую выборку.
-    # Ошибка модели не должна отменять уже сохранённый результат.
     try:
         labeled = ml.sync_confirmed_results()
+
         if labeled:
             print(
                 f"🧠 OLD ML: размечено новых результатов: {labeled}",
@@ -630,23 +830,62 @@ def _finish_signal(key, info, won, score1, score2, now):
             flush=True,
         )
 
-    if info.get("message_id") and info.get("base_text"):
-        try:
-            edit_telegram(
-                info["message_id"],
-                format_with_result(info["base_text"], result_line),
-            )
-        except Exception as e:
-            print(
-                f"⚠️ Результат сохранён, но Telegram не обновлён: {e}",
-                flush=True,
-            )
-    else:
+    # Формируем и сохраняем готовый текст до попытки редактирования.
+    # Если Telegram недоступен, текст останется в БД для повтора.
+    result_text = format_with_result(
+        info.get("base_text") or "",
+        result_line,
+    )
+
+    try:
+        db.save_live_telegram_result(str(key), result_text)
+    except Exception as e:
         print(
-            f"ℹ️ Сигнал {key}: нет message_id или base_text; "
-            "результат сохранён только в базе",
+            f"⚠️ Не удалось сохранить текст результата {key}: {e}",
             flush=True,
         )
+
+    try:
+        row = {
+            "game_id": str(key),
+            "status": "WIN" if won else "LOSE",
+            "final_score": final_score,
+            "old_s1": info.get("old_s1", 0),
+            "old_s2": info.get("old_s2", 0),
+            "minute": info.get("minute", 0),
+            "signal_ts": info.get("signal_ts"),
+            "sent_at": info.get("signal_ts"),
+            "result_updated_at": now,
+            "message_id": info.get("message_id"),
+            "base_text": info.get("base_text"),
+            "telegram_result_text": result_text,
+            "telegram_edit_attempts": 0,
+        }
+
+        if info.get("message_id") and info.get("base_text"):
+            _edit_completed_signal(
+                str(key),
+                row,
+                result_text=result_text,
+            )
+        else:
+            print(
+                f"ℹ️ Сигнал {key}: нет message_id или base_text; "
+                "результат сохранён в базе, отредактировать сообщение нельзя",
+                flush=True,
+            )
+
+    except Exception as e:
+        print(
+            f"⚠️ Результат сохранён, но обновление Telegram "
+            f"не выполнено для {key}: {e}",
+            flush=True,
+        )
+
+        try:
+            db.schedule_live_telegram_retry(str(key), delay=60)
+        except Exception:
+            pass
 
     log_result_record({
         "record_type": "result",
@@ -1081,6 +1320,7 @@ def try_send_signal(
 
     signal_data = {
         "game_id": key,
+        "match_name": p["match"],
         "match": p["match"],
         "league": p["league"],
         "minute": p["minute"],
@@ -1094,6 +1334,7 @@ def try_send_signal(
         "old_s2": p["s2"],
         "date_str": today,
         "signal_ts": now_ts,
+        "sent_at": now_ts,
         "message_id": msg_id,
         "base_text": text,
         "check_after": check_after,
@@ -1114,8 +1355,6 @@ def try_send_signal(
     # ========================================================
     # OLD ML — СОХРАНЕНИЕ ПРИЗНАКОВ
     # ========================================================
-    # Выполняется только после успешного сохранения сигнала
-    # в основную БД. Ошибка ML не влияет на отправку сигнала.
     try:
         ml_saved = ml.observe(
             p,
