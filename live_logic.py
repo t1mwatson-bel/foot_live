@@ -1,6 +1,6 @@
+
 import time
 import json
-import goal_model as ml
 import re
 import requests
 from datetime import datetime, timedelta
@@ -10,6 +10,7 @@ from telegram_bot import send_telegram, edit_telegram, format_with_result
 from stats_parser import *
 from ruscore import fetch_ruscore_events, find_match, parse_score_for_match
 import database as db
+import goal_model as ml
 
 
 # ============================================================
@@ -29,10 +30,7 @@ def log_result_record(record):
 # ============================================================
 
 def fetch_1xlite_live_games():
-    """
-    Получает текущую live-ленту.
-    Используется для проверки уже отправленных сигналов.
-    """
+    """Получает текущую live-ленту для проверки сигналов."""
     url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
 
     params = {
@@ -65,9 +63,10 @@ def fetch_1xlite_live_games():
         if isinstance(data, list):
             return [g for g in data if isinstance(g, dict)]
 
-        # Некоторые варианты API возвращают объект-обёртку.
         if isinstance(data, dict):
-            for field in ("Value", "value", "games", "Games", "events", "Events"):
+            for field in (
+                "Value", "value", "games", "Games", "events", "Events"
+            ):
                 value = data.get(field)
                 if isinstance(value, list):
                     return [g for g in value if isinstance(g, dict)]
@@ -81,10 +80,7 @@ def fetch_1xlite_live_games():
 
 
 def fetch_1xlite_game_by_id(game_id):
-    """
-    Запрашивает конкретный матч по ID.
-    Нужен, если матч уже исчез из ограниченной live-ленты.
-    """
+    """Запрашивает конкретный матч по ID."""
     url = f"{BASE_URL}/service-api/LiveFeed/GetGameZip"
 
     params = {
@@ -128,7 +124,6 @@ def fetch_1xlite_game_by_id(game_id):
             game["_requested_id"] = str(game_id)
             return game
 
-        # На случай, если API возвращает сам матч без обёртки Value.
         if any(k in data for k in ("SC", "scores", "id", "ID")):
             data["_requested_id"] = str(game_id)
             return data
@@ -162,14 +157,17 @@ def find_1xlite_game(games, game_id):
             game.get("_requested_id"),
         )
 
-        if any(value is not None and str(value) == target for value in candidates):
+        if any(
+            value is not None and str(value) == target
+            for value in candidates
+        ):
             return game
 
     return None
 
 
 def _parse_score_value(value):
-    """Пытается разобрать счёт из строки или словаря."""
+    """Разбирает счёт из строки или словаря."""
     if isinstance(value, str):
         match = re.search(
             r"^\s*(\d+)\s*[-:]\s*(\d+)\s*$",
@@ -192,14 +190,10 @@ def _parse_score_value(value):
 
 
 def parse_1xlite_score(game):
-    """
-    Разбирает счёт из разных известных вариантов ответа 1xLite.
-    Не принимает отсутствие счёта за 0:0.
-    """
+    """Разбирает счёт из известных вариантов ответа 1xLite."""
     if not isinstance(game, dict):
         return None, None
 
-    # Вариант обычной live-ленты.
     scores = game.get("scores") or {}
 
     if isinstance(scores, dict):
@@ -208,12 +202,10 @@ def parse_1xlite_score(game):
             if s1 is not None and s2 is not None:
                 return s1, s2
 
-        # Некоторые ответы хранят команды и счёт непосредственно в scores.
         s1, s2 = _parse_score_value(scores)
         if s1 is not None and s2 is not None:
             return s1, s2
 
-    # Вариант GetGameZip: SC.FS.S1 / SC.FS.S2.
     sc = game.get("SC") or {}
 
     if isinstance(sc, dict):
@@ -229,13 +221,11 @@ def parse_1xlite_score(game):
             except (TypeError, ValueError):
                 pass
 
-        # Резервные поля, встречающиеся в отдельных ответах.
         for key in ("FS", "S", "score", "Score"):
             s1, s2 = _parse_score_value(sc.get(key))
             if s1 is not None and s2 is not None:
                 return s1, s2
 
-    # Резервные прямые поля.
     for key in ("fullScore", "score", "Score", "result"):
         s1, s2 = _parse_score_value(game.get(key))
         if s1 is not None and s2 is not None:
@@ -249,12 +239,11 @@ def parse_1xlite_score(game):
 # ============================================================
 
 def _collect_status_text(value):
-    """Собирает текстовые значения статусов из вложенных объектов."""
+    """Собирает текстовые статусы из вложенных объектов."""
     parts = []
 
     if isinstance(value, dict):
         for key, nested in value.items():
-            # Не используем содержимое счёта для определения статуса.
             if str(key).lower() in {
                 "fs", "score", "scores", "s1", "s2", "value"
             }:
@@ -274,69 +263,41 @@ def _collect_status_text(value):
 
 
 def is_finished_status(status):
-    """Распознаёт только явные текстовые признаки завершения матча."""
+    """Распознаёт явные текстовые признаки завершения матча."""
     if isinstance(status, dict):
-        parts = _collect_status_text(status)
-        text = " ".join(parts)
+        text = " ".join(_collect_status_text(status))
     else:
         text = str(status or "")
 
     text = text.lower().replace("ё", "е")
-    text = " ".join(text.replace("_", " ").replace("-", " ").split())
+    text = " ".join(
+        text.replace("_", " ").replace("-", " ").split()
+    )
 
     finished_values = {
-        "finished",
-        "ended",
-        "ft",
-        "final",
-        "complete",
-        "completed",
-        "full time",
-        "match finished",
-        "match ended",
-        "завершен",
-        "завершена",
-        "матч завершен",
-        "окончен",
-        "окончена",
-        "закончен",
-        "закончена",
-        "матч окончен",
-        "матч закончен",
-        "игра завершена",
+        "finished", "ended", "ft", "final", "complete", "completed",
+        "full time", "match finished", "match ended",
+        "завершен", "завершена", "матч завершен",
+        "окончен", "окончена", "закончен", "закончена",
+        "матч окончен", "матч закончен", "игра завершена",
         "завершение матча",
     }
 
     if text in finished_values:
         return True
 
-    # Не используем слишком широкие проверки вроде наличия слова "end"
-    # внутри любого другого текста.
     prefixes = (
-        "finished ",
-        "ended ",
-        "completed ",
-        "full time ",
-        "match finished ",
-        "match ended ",
-        "завершен ",
-        "завершена ",
-        "матч завершен ",
-        "окончен ",
-        "окончена ",
-        "закончен ",
-        "закончена ",
+        "finished ", "ended ", "completed ", "full time ",
+        "match finished ", "match ended ", "завершен ",
+        "завершена ", "матч завершен ", "окончен ",
+        "окончена ", "закончен ", "закончена ",
     )
 
     return text.startswith(prefixes)
 
 
 def is_1xlite_finished(game):
-    """
-    Определяет завершение только по явным текстовым статусам.
-    Числовой SC.I сам по себе не трактуем как финальный статус:
-    без подтверждённой расшифровки это может привести к ложному проигрышу.
-    """
+    """Проверяет завершение по текстовым статусам и явным флагам."""
     if not isinstance(game, dict):
         return False
 
@@ -376,7 +337,6 @@ def is_1xlite_finished(game):
         if value is not None and is_finished_status(value):
             return True
 
-    # Отдельные API могут отдавать логические флаги завершения.
     for container in (game, scores, sc):
         if not isinstance(container, dict):
             continue
@@ -388,7 +348,9 @@ def is_1xlite_finished(game):
                 return True
 
             if isinstance(value, str):
-                if value.strip().lower() in ("true", "yes", "finished", "ended"):
+                if value.strip().lower() in (
+                    "true", "yes", "finished", "ended"
+                ):
                     return True
 
     return False
@@ -402,13 +364,8 @@ def get_ruscore_status(event):
     parts = []
 
     for key in (
-        "status",
-        "statusName",
-        "statusText",
-        "state",
-        "period",
-        "periodName",
-        "matchStatus",
+        "status", "statusName", "statusText", "state",
+        "period", "periodName", "matchStatus",
     ):
         value = event.get(key)
 
@@ -428,7 +385,7 @@ def get_ruscore_status(event):
 # ============================================================
 
 def restore_pending_checks():
-    """Восстанавливает ожидающие сигналы из базы данных."""
+    """Восстанавливает ожидающие сигналы из основной БД."""
     restored = {}
     now = int(time.time())
 
@@ -587,7 +544,7 @@ def persist_check(game_id, info):
 
 
 def _schedule_retry(key, info, now, delay=None):
-    """Планирует следующую попытку проверки."""
+    """Планирует следующую попытку проверки результата."""
     try:
         info["attempts"] = int(info.get("attempts", 0)) + 1
     except (TypeError, ValueError):
@@ -596,8 +553,6 @@ def _schedule_retry(key, info, now, delay=None):
     if delay is None:
         delay = CHECK_REPEAT_AFTER
 
-    # После большого количества неудачных попыток проверяем реже,
-    # но не переводим сигнал автоматически в проигрыш.
     if info["attempts"] >= CHECK_MAX_ATTEMPTS:
         delay = max(int(delay), 3600)
 
@@ -657,9 +612,23 @@ def _finish_signal(key, info, won, score1, score2, now):
             f"{info.get('match')} ({key}); повторим проверку",
             flush=True,
         )
-
         _schedule_retry(key, info, now)
         return False
+
+    # После подтверждения исхода обновляем обучающую выборку.
+    # Ошибка модели не должна отменять уже сохранённый результат.
+    try:
+        labeled = ml.sync_confirmed_results()
+        if labeled:
+            print(
+                f"🧠 OLD ML: размечено новых результатов: {labeled}",
+                flush=True,
+            )
+    except Exception as e:
+        print(
+            f"⚠️ OLD ML: ошибка синхронизации результатов: {e}",
+            flush=True,
+        )
 
     if info.get("message_id") and info.get("base_text"):
         try:
@@ -709,15 +678,17 @@ def _has_new_goal(score1, score2, old_s1, old_s2):
         return False
 
     try:
-        return int(score1) > int(old_s1) or int(score2) > int(old_s2)
+        return (
+            int(score1) > int(old_s1)
+            or int(score2) > int(old_s2)
+        )
     except (TypeError, ValueError):
         return False
 
 
 def _get_dates_to_check(info, now):
-    """Возвращает дату сигнала и соседние даты для поиска матча."""
+    """Возвращает дату сигнала и соседние даты."""
     dates = []
-
     primary_date = info.get("date_str")
 
     if primary_date:
@@ -777,7 +748,6 @@ def check_pending_results(pending_checks):
         flush=True,
     )
 
-    # Один общий запрос live-ленты на весь цикл.
     live_games = fetch_1xlite_live_games()
 
     for key in due_keys:
@@ -804,7 +774,7 @@ def check_pending_results(pending_checks):
         live_game = find_1xlite_game(live_games, key)
 
         # ----------------------------------------------------
-        # 1. 1XLITE LIVE-ЛЕНТА
+        # 1. LIVE-ЛЕНТА 1XLITE
         # ----------------------------------------------------
 
         if live_game is not None:
@@ -839,9 +809,13 @@ def check_pending_results(pending_checks):
         # ----------------------------------------------------
         # 2. ОТДЕЛЬНЫЙ ЗАПРОС МАТЧА ПО ID
         # ----------------------------------------------------
-        # Live-лента ограничена количеством игр. Матч мог исчезнуть
-        # из неё, поэтому пробуем получить его напрямую.
-        if live_game is None or score1 is None or score2 is None or not finished:
+
+        if (
+            live_game is None
+            or score1 is None
+            or score2 is None
+            or not finished
+        ):
             print(
                 f"🔎 GetGameZip: запрашиваем матч ID={key} "
                 f"({match_name})",
@@ -851,11 +825,19 @@ def check_pending_results(pending_checks):
             detailed_game = fetch_1xlite_game_by_id(key)
 
             if detailed_game is not None:
-                detail_s1, detail_s2 = parse_1xlite_score(detailed_game)
-                detail_finished = is_1xlite_finished(detailed_game)
+                detail_s1, detail_s2 = parse_1xlite_score(
+                    detailed_game
+                )
+                detail_finished = is_1xlite_finished(
+                    detailed_game
+                )
 
                 sc = detailed_game.get("SC") or {}
-                raw_status = sc.get("I") if isinstance(sc, dict) else None
+                raw_status = (
+                    sc.get("I")
+                    if isinstance(sc, dict)
+                    else None
+                )
 
                 print(
                     f"📡 1xLite GetGameZip: {match_name} | "
@@ -865,7 +847,6 @@ def check_pending_results(pending_checks):
                     flush=True,
                 )
 
-                # Если прямой запрос вернул счёт, используем его.
                 if detail_s1 is not None and detail_s2 is not None:
                     score1, score2 = detail_s1, detail_s2
                     finished = detail_finished
@@ -889,6 +870,7 @@ def check_pending_results(pending_checks):
         # ----------------------------------------------------
         # 3. RUSCORE — РЕЗЕРВНЫЙ ИСТОЧНИК
         # ----------------------------------------------------
+
         team1 = str(info.get("team1") or "").strip()
         team2 = str(info.get("team2") or "").strip()
 
@@ -990,9 +972,9 @@ def check_pending_results(pending_checks):
             )
 
         # ----------------------------------------------------
-        # 4. НЕТ ПОДТВЕРЖДЁННОГО ИСХОДА
+        # 4. ИСХОД НЕ ПОДТВЕРЖДЁН
         # ----------------------------------------------------
-        # Не считаем отсутствие матча или статуса проигрышем.
+
         print(
             f"⏳ Ожидание: {match_name}. "
             "Исход пока не подтверждён; будет повторная проверка.",
@@ -1128,6 +1110,38 @@ def try_send_signal(
             flush=True,
         )
         return False
+
+    # ========================================================
+    # OLD ML — СОХРАНЕНИЕ ПРИЗНАКОВ
+    # ========================================================
+    # Выполняется только после успешного сохранения сигнала
+    # в основную БД. Ошибка ML не влияет на отправку сигнала.
+    try:
+        ml_saved = ml.observe(
+            p,
+            strategy,
+            odds=odd,
+        )
+
+        if ml_saved:
+            print(
+                f"🧠 OLD ML: признаки сохранены | "
+                f"{p['match']} | {strategy['strategy']} | "
+                f"кэф {odd:.2f}",
+                flush=True,
+            )
+        else:
+            print(
+                f"ℹ️ OLD ML: признаки уже записаны или нет ID | "
+                f"{p['match']}",
+                flush=True,
+            )
+
+    except Exception as e:
+        print(
+            f"⚠️ OLD ML: не удалось сохранить признаки: {e}",
+            flush=True,
+        )
 
     sent_signals[key] = {
         "ts": now_ts,
