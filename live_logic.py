@@ -229,7 +229,9 @@ def get_ruscore_status(event):
 # ВОССТАНОВЛЕНИЕ ПРОВЕРОК ПОСЛЕ ПЕРЕЗАПУСКА
 # ============================================================
 
+
 def restore_pending_checks():
+    """Восстанавливает старые ожидающие сигналы, даже если часть полей пустая."""
     restored = {}
     now = int(time.time())
 
@@ -240,43 +242,101 @@ def restore_pending_checks():
         return restored
 
     for row in rows:
-        game_id = str(row.get("game_id") or "")
-        team1 = row.get("team1")
-        team2 = row.get("team2")
+        key = str(row.get("game_id") or "").strip()
+        if not key:
+            continue
+
+        match_name = str(row.get("match_name") or "").strip()
+        team1 = str(row.get("team1") or "").strip()
+        team2 = str(row.get("team2") or "").strip()
+
+        # Если отдельные поля команд пусты, пробуем разобрать название матча.
+        if not team1 or not team2:
+            for separator in (" — ", " – ", " - ", " vs "):
+                if separator in match_name:
+                    parts = match_name.split(separator, 1)
+                    if len(parts) == 2:
+                        team1 = team1 or parts[0].strip()
+                        team2 = team2 or parts[1].strip()
+                        break
+
+        # В старых записях исходный счёт может храниться только в поле score.
         old_s1 = row.get("old_s1")
         old_s2 = row.get("old_s2")
-        message_id = row.get("message_id")
-        base_text = row.get("base_text") or ""
 
-        if (
-            not game_id or not team1 or not team2
-            or old_s1 is None or old_s2 is None
-            or not message_id or not base_text
-        ):
+        if old_s1 is None or old_s2 is None:
+            raw_score = str(row.get("score") or "").strip()
+            match = re.search(r"^\s*(\d+)\s*[-:]\s*(\d+)\s*$", raw_score)
+            if match:
+                old_s1 = int(match.group(1))
+                old_s2 = int(match.group(2))
+
+        if old_s1 is None or old_s2 is None:
             print(
-                f"⚠️ Сигнал {game_id}: не хватает данных для восстановления",
+                f"⚠️ Сигнал {key}: исходный счёт отсутствует, "
+                "автоматическая проверка невозможна",
                 flush=True,
             )
             continue
 
-        restored[game_id] = {
+        try:
+            old_s1 = int(old_s1)
+            old_s2 = int(old_s2)
+        except (TypeError, ValueError):
+            print(f"⚠️ Сигнал {key}: некорректный исходный счёт", flush=True)
+            continue
+
+        sent_at = int(row.get("sent_at") or now)
+        signal_ts = int(row.get("signal_ts") or sent_at)
+
+        date_str = row.get("date_str")
+        if not date_str:
+            date_str = datetime.fromtimestamp(
+                signal_ts, MOSCOW_TZ
+            ).strftime("%Y-%m-%d")
+
+        # Старые сигналы можно проверять без Telegram message_id и base_text.
+        message_id = row.get("message_id")
+        try:
+            message_id = int(message_id) if message_id else None
+        except (TypeError, ValueError):
+            message_id = None
+
+        base_text = row.get("base_text") or ""
+
+        info = {
             "team1": team1,
             "team2": team2,
-            "match": row.get("match_name") or f"{team1} — {team2}",
-            "date_str": row.get("date_str") or datetime.now(
-                MOSCOW_TZ
-            ).strftime("%Y-%m-%d"),
-            "old_s1": int(old_s1),
-            "old_s2": int(old_s2),
+            "match": match_name or (
+                f"{team1} — {team2}" if team1 and team2 else f"Матч {key}"
+            ),
+            "date_str": date_str,
+            "old_s1": old_s1,
+            "old_s2": old_s2,
             "minute": int(row.get("minute") or 0),
-            "signal_ts": int(row.get("signal_ts") or row.get("sent_at") or now),
-            "message_id": int(message_id),
+            "signal_ts": signal_ts,
+            "message_id": message_id,
             "base_text": base_text,
             "strategy": row.get("strategy") or "не указана",
             "odd": row.get("odds"),
             "check_after": min(int(row.get("check_after") or now), now),
             "attempts": int(row.get("attempts") or 0),
         }
+
+        restored[key] = info
+
+        # Заполняем недостающие поля, не удаляя и не заменяя историю.
+        try:
+            persist_check(key, info)
+        except Exception as e:
+            print(f"⚠️ Не удалось обновить данные сигнала {key}: {e}", flush=True)
+
+        if not team1 or not team2:
+            print(
+                f"⚠️ Сигнал {key}: восстановлен по ID и счёту, "
+                "но для поиска в Ruscore не хватает названий команд",
+                flush=True,
+            )
 
     print(f"♻️ Восстановлено ожидающих проверок: {len(restored)}", flush=True)
     return restored
@@ -361,13 +421,25 @@ def _finish_signal(key, info, won, score1, score2, now):
         _schedule_retry(key, info, now)
         return False
 
+    
+if info.get("message_id") and info.get("base_text"):
     try:
         edit_telegram(
             info["message_id"],
             format_with_result(info["base_text"], result_line),
         )
     except Exception as e:
-        print(f"⚠️ Результат сохранён, ошибка изменения Telegram: {e}", flush=True)
+        print(
+            f"⚠️ Результат сохранён в базе, "
+            f"но Telegram-сообщение не обновлено: {e}",
+            flush=True,
+        )
+else:
+    print(
+        f"ℹ️ Сигнал {key}: результат сохранён в базе; "
+        "старое Telegram-сообщение нельзя обновить — нет его ID или текста",
+        flush=True,
+    )
 
     log_result_record({
         "record_type": "result",
