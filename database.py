@@ -1,10 +1,12 @@
 
 import os
 import sqlite3
+import time
 from datetime import datetime
 
 DATA_DIR = os.getenv("DATA_DIR", "/app")
 os.makedirs(DATA_DIR, exist_ok=True)
+
 DB_PATH = os.path.join(DATA_DIR, "bot_stats.db")
 
 
@@ -16,7 +18,7 @@ def get_connection():
 
 
 def init_db():
-    """Создаёт таблицы и добавляет недостающие поля без удаления истории."""
+    """Создаёт таблицы и добавляет отсутствующие поля без удаления истории."""
     with get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
@@ -54,7 +56,6 @@ def init_db():
             )
         """)
 
-        # Дополнительные поля нужны для восстановления проверок после рестарта.
         migrations = {
             "team1": "TEXT",
             "team2": "TEXT",
@@ -68,307 +69,244 @@ def init_db():
             "attempts": "INTEGER DEFAULT 0",
             "final_score": "TEXT",
             "result_updated_at": "INTEGER",
+            "telegram_updated": "INTEGER DEFAULT 0",
+            "telegram_retry_after": "INTEGER DEFAULT 0",
+            "telegram_edit_attempts": "INTEGER DEFAULT 0",
+            "telegram_result_text": "TEXT",
         }
 
         existing = {
             row["name"]
-            for row in conn.execute("PRAGMA table_info(live_signals)").fetchall()
+            for row in conn.execute(
+                "PRAGMA table_info(live_signals)"
+            ).fetchall()
         }
 
         for column, sql_type in migrations.items():
             if column not in existing:
                 conn.execute(
-                    f"ALTER TABLE live_signals ADD COLUMN {column} {sql_type}"
+                    f"ALTER TABLE live_signals "
+                    f"ADD COLUMN {column} {sql_type}"
                 )
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_live_status
             ON live_signals(status)
         """)
+
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_live_sent_at
             ON live_signals(sent_at)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_live_telegram_retry
+            ON live_signals(status, telegram_updated, telegram_retry_after)
         """)
 
     print(f"✅ База данных готова: {DB_PATH}", flush=True)
 
 
 def save_signal(data):
-    """Сохранение обычного, прематчевого прогноза."""
-    try:
-        with get_connection() as conn:
-            cur = conn.execute("""
-                INSERT OR IGNORE INTO signals (
-                    match_slug, match_name, league, start_time, odds, score,
-                    xg_home, xg_away, home_team, away_team, sent_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                data.get("match_slug", ""),
-                data.get("match", ""),
-                data.get("league", ""),
-                data.get("start_ts", 0),
-                data.get("odd_tb25", 0.0),
-                data.get("score", 0),
-                data.get("home_stats", {}).get("avg_xg", 0.0),
-                data.get("away_stats", {}).get("avg_xg", 0.0),
-                data.get("team1", ""),
-                data.get("team2", ""),
-                int(datetime.now().timestamp()),
-            ))
-            return cur.rowcount > 0
-    except Exception as e:
-        print(f"❌ DB save_signal: {e}", flush=True)
-        return False
+    """Сохраняет обычный сигнал в таблицу signals."""
+    now = int(time.time())
+
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO signals (
+                match_slug, match_name, league, start_time,
+                odds, score, xg_home, xg_away,
+                home_team, away_team, status, profit, sent_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?)
+            ON CONFLICT(match_slug) DO NOTHING
+        """, (
+            data.get("match_slug"),
+            data.get("match_name"),
+            data.get("league"),
+            data.get("start_time"),
+            data.get("odds"),
+            data.get("score"),
+            data.get("xg_home"),
+            data.get("xg_away"),
+            data.get("home_team"),
+            data.get("away_team"),
+            data.get("sent_at", now),
+        ))
 
 
 def save_live_signal(data):
-    """Сохраняет лайв-сигнал вместе с данными для проверки результата."""
-    game_id = str(data.get("game_id", "")).strip()
+    """Сохраняет лайв-сигнал и данные для последующей проверки результата."""
+    now = int(time.time())
+    game_id = str(data.get("game_id", ""))
+
     if not game_id:
-        print("❌ DB: не сохранён лайв-сигнал без game_id", flush=True)
+        print("❌ Нельзя сохранить сигнал без game_id", flush=True)
         return False
 
-    now = int(datetime.now().timestamp())
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM live_signals WHERE game_id = ?",
+            (game_id,),
+        ).fetchone()
 
-    try:
-        with get_connection() as conn:
-            cur = conn.execute("""
-                INSERT OR IGNORE INTO live_signals (
-                    game_id, match_name, league, minute, score,
-                    strategy, dominant, odds, sent_at,
-                    team1, team2, old_s1, old_s2, date_str,
-                    signal_ts, message_id, base_text,
-                    check_after, attempts, status
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
-            """, (
-                game_id,
-                data.get("match", ""),
-                data.get("league", ""),
-                data.get("minute", 0),
-                str(data.get("score", "0-0")),
-                data.get("strategy", ""),
-                data.get("dominant", ""),
-                data.get("odds", 0.0),
-                now,
-                data.get("team1"),
-                data.get("team2"),
-                data.get("old_s1"),
-                data.get("old_s2"),
-                data.get("date_str"),
-                data.get("signal_ts", now),
-                data.get("message_id"),
-                data.get("base_text", ""),
-                data.get("check_after", 0),
-                data.get("attempts", 0),
-            ))
+        if existing:
+            return True
 
-            if cur.rowcount > 0:
-                return True
+        conn.execute("""
+            INSERT INTO live_signals (
+                game_id, match_name, league, minute, score,
+                strategy, dominant, odds, status, profit, sent_at,
+                team1, team2, old_s1, old_s2, date_str,
+                signal_ts, message_id, base_text,
+                check_after, attempts, telegram_updated,
+                telegram_retry_after, telegram_edit_attempts
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0
+            )
+        """, (
+            game_id,
+            data.get("match_name"),
+            data.get("league"),
+            data.get("minute", 0),
+            data.get("score"),
+            data.get("strategy"),
+            data.get("dominant"),
+            data.get("odds"),
+            data.get("sent_at", now),
+            data.get("team1"),
+            data.get("team2"),
+            data.get("old_s1", 0),
+            data.get("old_s2", 0),
+            data.get("date_str"),
+            data.get("signal_ts", now),
+            data.get("message_id"),
+            data.get("base_text"),
+            data.get("check_after", now),
+            data.get("attempts", 0),
+        ))
 
-            # Запись с таким game_id уже существует: не создаём дубль.
-            row = conn.execute(
-                "SELECT status FROM live_signals WHERE game_id = ?",
-                (game_id,),
-            ).fetchone()
-
-            return bool(row)
-
-    except Exception as e:
-        print(f"❌ DB save_live_signal: {e}", flush=True)
-        return False
+        return True
 
 
 def update_live_signal_check(game_id, data):
-    """Сохраняет состояние проверки и текст сообщения Telegram."""
+    """Обновляет параметры проверки только у ожидающего сигнала."""
     allowed = {
         "team1", "team2", "old_s1", "old_s2", "date_str",
         "signal_ts", "message_id", "base_text", "check_after",
         "attempts", "final_score",
     }
 
-    updates = [(key, value) for key, value in data.items() if key in allowed]
-    if not updates:
-        return True
+    updates = {
+        key: value
+        for key, value in data.items()
+        if key in allowed
+    }
 
-    assignments = ", ".join(f"{key} = ?" for key, _ in updates)
-    values = [value for _, value in updates]
+    if not updates:
+        return False
+
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    values = list(updates.values())
     values.append(str(game_id))
 
-    try:
-        with get_connection() as conn:
-            conn.execute(
-                f"UPDATE live_signals SET {assignments} "
-                "WHERE game_id = ? AND status = 'PENDING'",
-                values,
-            )
-        return True
-    except Exception as e:
-        print(f"❌ DB update_live_signal_check: {e}", flush=True)
-        return False
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE live_signals
+            SET {assignments}
+            WHERE game_id = ? AND status = 'PENDING'
+            """,
+            values,
+        )
+        return cur.rowcount > 0
 
 
 def is_live_signal_sent(game_id):
-    """Не допускает повторную отправку сигнала по тому же матчу."""
-    try:
-        with get_connection() as conn:
-            row = conn.execute("""
-                SELECT 1
-                FROM live_signals
-                WHERE game_id = ?
-                  AND status IN ('PENDING', 'WIN', 'LOSE')
-                LIMIT 1
-            """, (str(game_id),)).fetchone()
-            return row is not None
-    except Exception as e:
-        print(f"❌ DB is_live_signal_sent: {e}", flush=True)
-        # При ошибке базы безопаснее не отправлять возможный дубль.
-        return True
-
-
-def mark_live_signal_sent(game_id):
-    """Совместимость со старым кодом; не перезаписывает существующую запись."""
-    try:
-        with get_connection() as conn:
-            conn.execute("""
-                INSERT OR IGNORE INTO live_signals (
-                    game_id, sent_at, status
-                )
-                VALUES (?, ?, 'PENDING')
-            """, (str(game_id), int(datetime.now().timestamp())))
-    except Exception as e:
-        print(f"❌ DB mark_live_signal_sent: {e}", flush=True)
-
-
-def get_all_signals():
-    """Возвращает прематчевые прогнозы."""
+    """Проверяет, записан ли сигнал с таким ID."""
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM signals ORDER BY sent_at DESC"
-        ).fetchall()
-        return [dict(row) for row in rows]
+        row = conn.execute("""
+            SELECT 1
+            FROM live_signals
+            WHERE game_id = ?
+              AND status IN ('PENDING', 'WIN', 'LOSE')
+            LIMIT 1
+        """, (str(game_id),)).fetchone()
+
+        return row is not None
 
 
 def get_live_signals():
-    """Возвращает лайв-прогнозы для сайта."""
+    """Возвращает все лайв-сигналы для сайта статистики."""
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM live_signals ORDER BY sent_at DESC"
-        ).fetchall()
-        return [dict(row) for row in rows]
+        rows = conn.execute("""
+            SELECT *
+            FROM live_signals
+            ORDER BY sent_at DESC, id DESC
+        """).fetchall()
 
-
-def get_pending_signals():
-    with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM signals WHERE status = 'PENDING'"
-        ).fetchall()
         return [dict(row) for row in rows]
 
 
 def get_pending_live_signals():
-    """Возвращает незавершённые лайв-прогнозы для восстановления после рестарта."""
+    """Возвращает сигналы, ожидающие определения результата."""
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT *
             FROM live_signals
             WHERE status = 'PENDING'
-            ORDER BY sent_at ASC
+            ORDER BY sent_at ASC, id ASC
         """).fetchall()
+
         return [dict(row) for row in rows]
 
 
-def update_result(match_slug, goals_total):
-    """Результат прематчевого прогноза на тотал больше 2.5."""
-    try:
-        with get_connection() as conn:
-            row = conn.execute("""
-                SELECT odds
-                FROM signals
-                WHERE match_slug = ? AND status = 'PENDING'
-            """, (match_slug,)).fetchone()
-
-            if not row:
-                return False
-
-            won = float(goals_total) > 2.5
-            status = "WIN" if won else "LOSE"
-            odds = float(row["odds"] or 0)
-            profit = odds - 1.0 if won else -1.0
-
-            conn.execute("""
-                UPDATE signals
-                SET status = ?, profit = ?
-                WHERE match_slug = ? AND status = 'PENDING'
-            """, (status, profit, match_slug))
-
-        return True
-    except Exception as e:
-        print(f"❌ DB update_result: {e}", flush=True)
-        return False
-
-
 def update_live_result(game_id, is_goal_scored, final_score=None):
-    """Фиксирует итог лайв-сигнала только один раз."""
-    game_id = str(game_id)
-    now = int(datetime.now().timestamp())
+    """Фиксирует результат сигнала, не перезаписывая закрытый результат."""
+    status = "WIN" if is_goal_scored else "LOSE"
+    profit = 1.0 if is_goal_scored else -1.0
+    now = int(time.time())
 
-    try:
-        with get_connection() as conn:
-            row = conn.execute("""
-                SELECT odds, status
-                FROM live_signals
-                WHERE game_id = ?
-            """, (game_id,)).fetchone()
-
-            if not row:
-                print(f"⚠️ DB: сигнал {game_id} не найден для фиксации результата",
-                      flush=True)
-                return False
-
-            if row["status"] != "PENDING":
-                return row["status"] in ("WIN", "LOSE")
-
-            won = bool(is_goal_scored)
-            status = "WIN" if won else "LOSE"
-            odds = float(row["odds"] or 0)
-            profit = odds - 1.0 if won else -1.0
-
-            cur = conn.execute("""
-                UPDATE live_signals
-                SET status = ?, profit = ?, final_score = ?,
-                    result_updated_at = ?
-                WHERE game_id = ? AND status = 'PENDING'
-            """, (status, profit, final_score, now, game_id))
-
-            return cur.rowcount > 0
-
-    except Exception as e:
-        print(f"❌ DB update_live_result: {e}", flush=True)
-        return False
-
-
-def get_stats():
-    """Общая статистика прематчевых прогнозов."""
     with get_connection() as conn:
         row = conn.execute("""
-            SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN status = 'LOSE' THEN 1 ELSE 0 END) AS loses
-            FROM signals
-        """).fetchone()
+            SELECT status
+            FROM live_signals
+            WHERE game_id = ?
+        """, (str(game_id),)).fetchone()
 
-        return {
-            "total": row["total"] or 0,
-            "wins": row["wins"] or 0,
-            "loses": row["loses"] or 0,
-        }
+        if row is None:
+            print(
+                f"❌ Не найден сигнал для записи результата: {game_id}",
+                flush=True,
+            )
+            return False
+
+        if row["status"] != "PENDING":
+            return row["status"] in ("WIN", "LOSE")
+
+        cur = conn.execute("""
+            UPDATE live_signals
+            SET status = ?,
+                profit = ?,
+                final_score = ?,
+                result_updated_at = ?
+            WHERE game_id = ?
+              AND status = 'PENDING'
+        """, (
+            status,
+            profit,
+            final_score,
+            now,
+            str(game_id),
+        ))
+
+        return cur.rowcount > 0
 
 
 def get_live_stats():
-    """Статистика именно лайв-прогнозов."""
+    """Возвращает основные показатели лайв-статистики."""
     with get_connection() as conn:
         row = conn.execute("""
             SELECT
@@ -378,7 +316,6 @@ def get_live_stats():
                 SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
                 COALESCE(SUM(profit), 0) AS profit
             FROM live_signals
-            WHERE game_id IS NOT NULL AND game_id != ''
         """).fetchone()
 
         return {
@@ -386,5 +323,66 @@ def get_live_stats():
             "wins": row["wins"] or 0,
             "loses": row["loses"] or 0,
             "pending": row["pending"] or 0,
-            "profit": float(row["profit"] or 0),
+            "profit": row["profit"] or 0.0,
         }
+
+
+def save_live_telegram_result(game_id, result_text):
+    """Сохраняет сформированный текст результата для повторной отправки."""
+    with get_connection() as conn:
+        cur = conn.execute("""
+            UPDATE live_signals
+            SET telegram_result_text = ?
+            WHERE game_id = ?
+        """, (result_text, str(game_id)))
+
+        return cur.rowcount > 0
+
+
+def get_live_telegram_pending():
+    """Возвращает завершённые сигналы, сообщения которых нужно обновить."""
+    now = int(time.time())
+
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT *
+            FROM live_signals
+            WHERE status IN ('WIN', 'LOSE')
+              AND COALESCE(telegram_updated, 0) = 0
+              AND message_id IS NOT NULL
+              AND COALESCE(base_text, '') != ''
+              AND COALESCE(telegram_retry_after, 0) <= ?
+            ORDER BY result_updated_at ASC, id ASC
+        """, (now,)).fetchall()
+
+        return [dict(row) for row in rows]
+
+
+def mark_live_telegram_updated(game_id):
+    """Помечает сообщение как успешно обновлённое."""
+    with get_connection() as conn:
+        cur = conn.execute("""
+            UPDATE live_signals
+            SET telegram_updated = 1,
+                telegram_retry_after = 0
+            WHERE game_id = ?
+        """, (str(game_id),))
+
+        return cur.rowcount > 0
+
+
+def schedule_live_telegram_retry(game_id, delay=60):
+    """Планирует следующую попытку редактирования Telegram-сообщения."""
+    retry_after = int(time.time()) + max(30, int(delay))
+
+    with get_connection() as conn:
+        cur = conn.execute("""
+            UPDATE live_signals
+            SET telegram_retry_after = ?,
+                telegram_edit_attempts =
+                    COALESCE(telegram_edit_attempts, 0) + 1
+            WHERE game_id = ?
+              AND COALESCE(telegram_updated, 0) = 0
+        """, (retry_after, str(game_id)))
+
+        return cur.rowcount > 0
