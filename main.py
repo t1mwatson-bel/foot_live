@@ -1,6 +1,7 @@
 
 import time
 import threading
+import traceback
 from datetime import datetime
 
 import requests
@@ -22,6 +23,7 @@ from live_logic import (
     check_pending_results,
     try_send_signal,
     restore_pending_checks,
+    retry_pending_telegram_updates,
 )
 from ruscore import get_today_schedule, get_windows
 
@@ -94,10 +96,13 @@ def monitor():
     # Храним оба варианта ID: число и строку.
     # Это защищает от несовпадения типа game_id при поиске коэффициента.
     p_game_cache = {}
+
     for game in games:
         if not isinstance(game, dict):
             continue
+
         gid = game.get("id")
+
         if gid is not None:
             p_game_cache[gid] = game
             p_game_cache[str(gid)] = game
@@ -106,6 +111,7 @@ def monitor():
 
     for game in games:
         lid = (game.get("liga") or {}).get("id")
+
         if lid in LEAGUE_IDS:
             found_leagues[lid] = found_leagues.get(lid, 0) + 1
 
@@ -113,17 +119,25 @@ def monitor():
         for lid, count in found_leagues.items():
             print(f"🏆 {LEAGUE_IDS[lid]}: {count}", flush=True)
     else:
-        print("⚠️ В текущем ответе нет матчей из LEAGUE_IDS", flush=True)
+        print(
+            "⚠️ В текущем ответе нет матчей из LEAGUE_IDS",
+            flush=True,
+        )
 
     for game in games:
         try:
             parsed = parse_game(game)
+
             if not parsed:
                 continue
 
             gid = parsed["game_id"]
 
-            update_match_history(parsed, now_ts, recent_snapshots)
+            update_match_history(
+                parsed,
+                now_ts,
+                recent_snapshots,
+            )
 
             if not common_ok(parsed, gid, now_ts, last_scores):
                 continue
@@ -161,8 +175,8 @@ def monitor():
                 flush=True,
             )
 
-    # Старые антиспам-записи очищаем, но активные проверки
-    # не удаляем из pending_checks.
+    # Очищаем старые антиспам-записи.
+    # Активные проверки результатов не удаляем.
     sent_signals = {
         key: value
         for key, value in sent_signals.items()
@@ -177,7 +191,8 @@ def refresh_schedule_if_needed():
 
     if (
         schedule_updated_at
-        and (now - schedule_updated_at).total_seconds() < SCHEDULE_REFRESH_SEC
+        and (now - schedule_updated_at).total_seconds()
+        < SCHEDULE_REFRESH_SEC
     ):
         return
 
@@ -185,16 +200,21 @@ def refresh_schedule_if_needed():
         schedule = get_today_schedule()
         schedule_windows = get_windows(schedule)
         schedule_updated_at = now
+
         print(
             f"📅 Расписание обновлено. Окон: {len(schedule_windows)}",
             flush=True,
         )
+
     except Exception as e:
-        print(f"⚠️ Не удалось обновить расписание: {e}", flush=True)
+        print(
+            f"⚠️ Не удалось обновить расписание: {e}",
+            flush=True,
+        )
 
 
 def is_match_time():
-    # Сохраняем прежнее поведение текущей версии бота:
+    # Сохраняем прежнее поведение:
     # мониторинг API не зависит от расписания Ruscore.
     return True
 
@@ -208,8 +228,40 @@ def run_web():
             use_reloader=False,
             threaded=True,
         )
+
     except Exception as e:
         print(f"❌ Ошибка запуска сайта: {e}", flush=True)
+
+
+def retry_telegram_results():
+    """
+    Повторно обновляет завершённые результаты в Telegram.
+
+    Ошибка редактирования сообщения не должна останавливать
+    мониторинг матчей и проверку остальных результатов.
+    """
+    try:
+        retry_pending_telegram_updates()
+
+    except Exception as e:
+        print(
+            f"❌ Ошибка повторного обновления Telegram: {e}",
+            flush=True,
+        )
+        traceback.print_exc()
+
+
+def check_results_safely():
+    """Проверяет результаты матчей, не останавливая основной цикл."""
+    try:
+        check_pending_results(pending_checks)
+
+    except Exception as e:
+        print(
+            f"❌ Ошибка проверки результатов: {e}",
+            flush=True,
+        )
+        traceback.print_exc()
 
 
 def bot_loop():
@@ -220,21 +272,36 @@ def bot_loop():
             now = datetime.now(MOSCOW_TZ)
             now_str = now.strftime("%H:%M")
 
-            # Проверки результатов запускаются независимо от мониторинга.
-            check_pending_results(pending_checks)
+            # 1. Проверяем исходы ожидающих сигналов.
+            check_results_safely()
 
+            # 2. Повторяем обновление сообщений Telegram,
+            # даже если результат уже сохранён на сайте.
+            retry_telegram_results()
+
+            # 3. Ночной режим не блокирует проверку результатов
+            # и повторное обновление Telegram.
             if SLEEP_HOUR_START <= now.hour < SLEEP_HOUR_END:
-                print(f"😴 Ночной режим ({now_str}); проверка результатов продолжается", flush=True)
+                print(
+                    f"😴 Ночной режим ({now_str}); "
+                    f"проверка результатов продолжается",
+                    flush=True,
+                )
                 time.sleep(60)
                 continue
 
+            # 4. Обновляем расписание и анализируем матчи.
             refresh_schedule_if_needed()
 
             if is_match_time():
                 monitor()
 
-            # Повторная проверка после обработки текущих матчей.
-            check_pending_results(pending_checks)
+            # 5. После анализа матчей проверяем результаты ещё раз.
+            check_results_safely()
+
+            # 6. Повторно пробуем отредактировать сообщения,
+            # которые не удалось обновить с первой попытки.
+            retry_telegram_results()
 
             time.sleep(UPDATE_INTERVAL)
 
@@ -243,18 +310,16 @@ def bot_loop():
             break
 
         except Exception as e:
-            print(f"❌ Ошибка основного цикла: {e}", flush=True)
-            import traceback
+            print(
+                f"❌ Ошибка основного цикла: {e}",
+                flush=True,
+            )
             traceback.print_exc()
 
-            # Не оставляем результаты без проверки из-за ошибки цикла.
-            try:
-                check_pending_results(pending_checks)
-            except Exception as check_error:
-                print(
-                    f"❌ Ошибка проверки результатов: {check_error}",
-                    flush=True,
-                )
+            # При ошибке цикла всё равно стараемся обработать
+            # результаты и обновить сообщения Telegram.
+            check_results_safely()
+            retry_telegram_results()
 
             time.sleep(30)
 
@@ -262,10 +327,14 @@ def bot_loop():
 if __name__ == "__main__":
     db.init_db()
 
-    # Восстанавливаем незавершённые прогнозы до начала основного цикла.
+    # Восстанавливаем незавершённые прогнозы из базы
+    # до начала основного цикла.
     pending_checks.update(restore_pending_checks())
 
-    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread = threading.Thread(
+        target=run_web,
+        daemon=True,
+    )
     web_thread.start()
 
     bot_loop()
