@@ -1,72 +1,309 @@
+```python
 import requests
 from datetime import datetime, timedelta
+
 from config import *
 
-def fetch_ruscore_events(date_str):
-    params = dict(RUSCORE_PARAMS); params["date"] = date_str
-    try:
-        r = requests.get(RUSCORE_URL, params=params, headers=RUSCORE_HEADERS, timeout=15)
-        if r.status_code != 200: return []
-        events = []
-        for block in r.json().get("data", []):
-            for ev in block.get("events", []):
-                ev["_league"] = block.get("name", ""); events.append(ev)
-        return events
-    except: return []
 
-def normalize_name(s):
-    if not s: return ""
-    return (s.lower().replace(" ", "").replace("-", "").replace("'", "").replace("ё", "е").replace(".", "").strip())
+# ============================================================
+# RUSCORE — ПОЛУЧЕНИЕ СОБЫТИЙ
+# ============================================================
+
+def fetch_ruscore_events(date_str):
+    params = dict(RUSCORE_PARAMS)
+    params["date"] = date_str
+
+    try:
+        response = requests.get(
+            RUSCORE_URL,
+            params=params,
+            headers=RUSCORE_HEADERS,
+            timeout=20
+        )
+
+        if response.status_code != 200:
+            print(
+                f"❌ Ruscore HTTP {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+            return []
+
+        payload = response.json()
+        data = payload.get("data", [])
+
+        if not isinstance(data, list):
+            print("⚠️ Ruscore: поле data не является списком")
+            return []
+
+        events = []
+
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+
+            # Новый формат: каждый элемент data — матч.
+            if item.get("home") and item.get("away"):
+                competition = item.get("competition") or {}
+                item["_league"] = competition.get(
+                    "name",
+                    item.get("_league", "")
+                )
+                events.append(item)
+                continue
+
+            # Старый формат: внутри блока лиги есть events.
+            block_name = item.get("name", "")
+
+            for event in item.get("events", []):
+                if not isinstance(event, dict):
+                    continue
+
+                event["_league"] = block_name
+                events.append(event)
+
+        print(
+            f"📥 Ruscore: дата {date_str}, "
+            f"получено событий: {len(events)}"
+        )
+
+        return events
+
+    except requests.RequestException as error:
+        print(f"❌ Ошибка запроса Ruscore: {error}")
+        return []
+
+    except (ValueError, TypeError, AttributeError) as error:
+        print(f"❌ Ошибка разбора Ruscore JSON: {error}")
+        return []
+
+
+# ============================================================
+# НОРМАЛИЗАЦИЯ НАЗВАНИЙ КОМАНД
+# ============================================================
+
+def normalize_name(name):
+    if not name:
+        return ""
+
+    name = str(name).lower().replace("ё", "е")
+
+    # Убираем пробелы, знаки препинания и дефисы.
+    return "".join(char for char in name if char.isalnum())
+
+
+def teams_match(name1, name2):
+    """
+    Сравнивает названия команд без учёта регистра,
+    пробелов, дефисов и знаков препинания.
+    """
+    a = normalize_name(name1)
+    b = normalize_name(name2)
+
+    if not a or not b:
+        return False
+
+    return a == b or a in b or b in a
+
+
+# ============================================================
+# ПОИСК МАТЧА
+# ============================================================
 
 def find_match(events, team1, team2):
-    n1, n2 = normalize_name(team1), normalize_name(team2)
-    for ev in events:
-        h, a = normalize_name((ev.get("home") or {}).get("name", "")), normalize_name((ev.get("away") or {}).get("name", ""))
-        if (n1 in h or h in n1) and (n2 in a or a in n2): return ev
-        if (n1 in a or a in n1) and (n2 in h or h in n2): return ev
+    for event in events:
+        home = (event.get("home") or {}).get("name", "")
+        away = (event.get("away") or {}).get("name", "")
+
+        # Обычный порядок: хозяева — гости.
+        if teams_match(team1, home) and teams_match(team2, away):
+            return event
+
+        # Обратный порядок.
+        if teams_match(team1, away) and teams_match(team2, home):
+            return event
+
     return None
 
-def parse_score_from_ruscore(ev):
-    for s in (ev.get("score") or []):
-        if s.get("type") == "overall":
-            h, a = s.get("home"), s.get("away")
-            if h == "" or a == "": return None, None
-            try: return int(h), int(a)
-            except: return None, None
+
+# ============================================================
+# РАЗБОР ИТОГОВОГО СЧЁТА
+# ============================================================
+
+def parse_score_from_ruscore(event):
+    """
+    Читает счёт только из известных полей score.
+    Если формат неизвестен или счёта нет — возвращает None.
+    """
+
+    score_data = event.get("score")
+
+    if isinstance(score_data, dict):
+        # На случай, если API возвращает счёт объектом.
+        candidates = [
+            score_data.get("overall"),
+            score_data
+        ]
+    elif isinstance(score_data, list):
+        candidates = score_data
+    else:
+        candidates = []
+
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+
+        score_type = str(item.get("type", "")).lower()
+
+        # Не используем счёт отдельных таймов.
+        if score_type and score_type not in (
+            "overall", "total", "full"
+        ):
+            continue
+
+        home_score = item.get("home")
+        away_score = item.get("away")
+
+        if home_score is None or away_score is None:
+            continue
+
+        try:
+            # Пустая строка не является нулём.
+            if str(home_score).strip() == "":
+                continue
+            if str(away_score).strip() == "":
+                continue
+
+            home_score = int(home_score)
+            away_score = int(away_score)
+
+            if home_score < 0 or away_score < 0:
+                continue
+
+            return home_score, away_score
+
+        except (ValueError, TypeError):
+            continue
+
     return None, None
 
-def parse_score_for_match(ev, team1, team2):
-    h_score, a_score = parse_score_from_ruscore(ev)
-    if h_score is None or a_score is None: return None, None
-    home, away = normalize_name((ev.get("home") or {}).get("name", "")), normalize_name((ev.get("away") or {}).get("name", ""))
-    n1, n2 = normalize_name(team1), normalize_name(team2)
-    if (n1 in home or home in n1) and (n2 in away or away in n2): return h_score, a_score
-    if (n1 in away or away in n1) and (n2 in home or home in n2): return a_score, h_score
+
+def parse_score_for_match(event, team1, team2):
+    home_score, away_score = parse_score_from_ruscore(event)
+
+    if home_score is None or away_score is None:
+        return None, None
+
+    home = (event.get("home") or {}).get("name", "")
+    away = (event.get("away") or {}).get("name", "")
+
+    if teams_match(team1, home) and teams_match(team2, away):
+        return home_score, away_score
+
+    if teams_match(team1, away) and teams_match(team2, home):
+        return away_score, home_score
+
     return None, None
+
+
+# ============================================================
+# ФИЛЬТР ЛИГ
+# ============================================================
 
 def is_our_league(name):
-    return any(p in name.lower() for p in RUSCORE_LEAGUES_FILTER) if name else False
+    if not name:
+        return False
+
+    filters = globals().get("RUSCORE_LEAGUES_FILTER", [])
+
+    # Пустой список фильтров означает отсутствие фильтрации.
+    if not filters:
+        return True
+
+    league = str(name).lower()
+
+    return any(
+        str(pattern).lower() in league
+        for pattern in filters
+        if pattern
+    )
+
+
+# ============================================================
+# РАСПИСАНИЕ МАТЧЕЙ НА СЕГОДНЯ
+# ============================================================
 
 def get_today_schedule():
     today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
     schedule = []
-    for ev in fetch_ruscore_events(today):
-        if not is_our_league(ev.get("_league", "")): continue
-        t = ev.get("time")
-        if not t: continue
+
+    for event in fetch_ruscore_events(today):
+        league = event.get("_league", "")
+
+        if not is_our_league(league):
+            continue
+
+        # В новом JSON время находится в datetime.
+        time_value = event.get("datetime") or event.get("time")
+
+        if not time_value:
+            continue
+
         try:
-            dt = datetime.fromisoformat(t)
-            schedule.append({"time": dt.astimezone(MOSCOW_TZ) if dt.tzinfo else MOSCOW_TZ.localize(dt)})
-        except: continue
+            dt = datetime.fromisoformat(
+                str(time_value).replace("Z", "+00:00")
+            )
+
+            if dt.tzinfo is None:
+                dt = MOSCOW_TZ.localize(dt)
+            else:
+                dt = dt.astimezone(MOSCOW_TZ)
+
+            schedule.append({
+                "time": dt,
+                "event_id": event.get("id"),
+                "home": (event.get("home") or {}).get("name", ""),
+                "away": (event.get("away") or {}).get("name", ""),
+                "league": league
+            })
+
+        except (ValueError, TypeError, AttributeError) as error:
+            print(
+                f"⚠️ Ruscore: неверное время матча "
+                f"{time_value!r}: {error}"
+            )
+
+    print(f"📅 Ruscore: матчей в расписании: {len(schedule)}")
+
     return schedule
 
+
+# ============================================================
+# ОБЪЕДИНЕНИЕ ВРЕМЕННЫХ ОКОН
+# ============================================================
+
 def get_windows(schedule):
-    if not schedule: return []
-    times = sorted([s["time"] for s in schedule])
-    windows = [(t, t + timedelta(hours=2)) for t in times]
+    if not schedule:
+        return []
+
+    times = sorted(item["time"] for item in schedule)
+
+    windows = [
+        (start, start + timedelta(hours=2))
+        for start in times
+    ]
+
     merged = [windows[0]]
+
     for start, end in windows[1:]:
-        ls, le = merged[-1]
-        if start <= le: merged[-1] = (ls, max(le, end))
-        else: merged.append((start, end))
+        last_start, last_end = merged[-1]
+
+        if start <= last_end:
+            merged[-1] = (
+                last_start,
+                max(last_end, end)
+            )
+        else:
+            merged.append((start, end))
+
     return merged
+```
