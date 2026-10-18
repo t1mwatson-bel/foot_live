@@ -1,4 +1,3 @@
-```python
 import requests
 
 from config import API, CHAT_ID
@@ -129,4 +128,3 @@ def format_with_result(base_text, result_line):
         return base_text
 
     return f"{base_text}\n\n{result_line}"
-```
