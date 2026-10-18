@@ -1,4 +1,3 @@
-```python
 import time
 import json
 import re
@@ -1175,4 +1174,3 @@ def try_send_signal(
     )
 
     return True
-```
