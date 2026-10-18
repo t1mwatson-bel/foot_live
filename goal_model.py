@@ -1,470 +1,792 @@
 
+import json
+import math
+import os
+import sqlite3
 import time
-import threading
-from datetime import datetime
+from pathlib import Path
 
-import requests
-import web
-import database as db
-import goal_model as ml
 
-from config import *
-from stats_parser import (
-    parse_game,
-    update_match_history,
-    common_ok,
-    strategy_xg,
-    strategy_shots,
-    strategy_corners,
-    strategy_attacks,
-    strategy_combo,
+# ============================================================
+# OLD ML — ТЕНЕВАЯ МОДЕЛЬ ФУТБОЛЬНЫХ СИГНАЛОВ
+# ============================================================
+# Модель только собирает данные и обучается.
+# Она НЕ влияет на отправку существующих сигналов.
+# Не импортируем live_logic.py: это предотвращает циклический импорт.
+# ============================================================
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+MODEL_DB = os.getenv(
+    "FOOTBALL_MODEL_DB",
+    str(DATA_DIR / "football_model.sqlite3"),
 )
-from ruscore import get_today_schedule, get_windows
+
+MODEL_FILE = os.getenv(
+    "FOOTBALL_MODEL_FILE",
+    str(DATA_DIR / "football_model.json"),
+)
+
+# Основная база сигналов. Учитываем фактический путь /app/data.
+def find_bot_db():
+    configured = os.getenv("FOOTBALL_BOT_DB")
+
+    candidates = [
+        configured,
+        "/app/data/bot_stats.db",
+        "/app/bot_stats.db",
+        str(DATA_DIR / "data" / "bot_stats.db"),
+        str(DATA_DIR / "bot_stats.db"),
+        "bot_stats.db",
+    ]
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    # Не создаём случайную новую базу вместо отсутствующей.
+    return configured or "/app/data/bot_stats.db"
+
+
+BOT_DB = find_bot_db()
+
+MIN_TRAINING_SAMPLES = 30
+LEARNING_RATE = 0.05
+L2 = 0.0005
+EPOCHS = 3
 
 
 # ============================================================
-# СОСТОЯНИЕ БОТА
+# ПРИЗНАКИ МАТЧА
 # ============================================================
 
-p_game_cache = {}
-sent_signals = {}
-pending_checks = {}
-last_scores = {}
-recent_snapshots = {}
+FEATURE_NAMES = [
+    "minute",
+    "score_total",
+    "score_diff",
+    "xg_total",
+    "xg_diff",
+    "shots_on_total",
+    "shots_on_diff",
+    "shots_total",
+    "shots_diff",
+    "attacks_total",
+    "attacks_diff",
+    "corners_total",
+    "corners_diff",
+    "red_total",
+    "trend_available",
+    "trend_xg",
+    "trend_shots_on",
+    "trend_shots",
+    "trend_corners",
+    "trend_attacks",
+    "strategy_xg",
+    "strategy_shots",
+    "strategy_corners",
+    "strategy_attacks",
+    "strategy_combo",
+    "odds",
+]
 
-schedule_windows = []
-schedule_updated_at = None
-
-# ML: период обслуживания модели — 5 минут.
-ML_MAINTENANCE_INTERVAL = 300
-last_ml_maintenance = 0
+SCALES = {
+    "minute": 90,
+    "score_total": 5,
+    "score_diff": 4,
+    "xg_total": 5,
+    "xg_diff": 4,
+    "shots_on_total": 15,
+    "shots_on_diff": 10,
+    "shots_total": 35,
+    "shots_diff": 20,
+    "attacks_total": 120,
+    "attacks_diff": 80,
+    "corners_total": 15,
+    "corners_diff": 10,
+    "red_total": 3,
+    "trend_available": 1,
+    "trend_xg": 2,
+    "trend_shots_on": 8,
+    "trend_shots": 15,
+    "trend_corners": 6,
+    "trend_attacks": 50,
+    "strategy_xg": 1,
+    "strategy_shots": 1,
+    "strategy_corners": 1,
+    "strategy_attacks": 1,
+    "strategy_combo": 1,
+    "odds": 3,
+}
 
 
 # ============================================================
-# OLD ML — ТЕНЕВОЕ ОБУЧЕНИЕ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
-def maintain_ml(force=False):
-    """
-    Синхронизирует подтверждённые результаты и обучает модель
-    при появлении новых размеченных примеров.
-
-    Важно:
-    ML не участвует в принятии решения об отправке сигнала.
-    Стратегии и их пороги остаются без изменений.
-    """
-    global last_ml_maintenance
-
-    now_ts = int(time.time())
-
-    if (
-        not force
-        and now_ts - last_ml_maintenance < ML_MAINTENANCE_INTERVAL
-    ):
-        return
-
-    last_ml_maintenance = now_ts
-
+def number(value, default=0.0):
     try:
-        # Переносим WIN/LOSE из основной базы в базу модели.
-        synced = ml.sync_confirmed_results()
+        if value is None or value == "":
+            return float(default)
 
-        if synced:
-            print(
-                f"🧠 OLD ML: синхронизировано результатов: {synced}",
-                flush=True,
-            )
+        if isinstance(value, str):
+            value = value.replace(",", ".")
 
-        state = ml.status()
+        result = float(value)
 
-        total = int(state.get("total", 0))
-        labeled = int(state.get("labeled", 0))
-        wins = int(state.get("wins", 0))
-        losses = int(state.get("losses", 0))
-        trained = int(state.get("trained_samples", 0))
+        if not math.isfinite(result):
+            return float(default)
 
-        print(
-            f"🧠 OLD ML | примеров: {total} | "
-            f"с результатом: {labeled} | "
-            f"WIN: {wins} | LOSE: {losses} | "
-            f"обучено на: {trained}",
-            flush=True,
-        )
+        return result
 
-        # Обучаем только при наличии минимального числа
-        # подтверждённых исходов и новых результатов.
-        if labeled >= 30 and labeled > trained:
-            result = ml.train()
-
-            if result.get("trained"):
-                print(
-                    f"✅ OLD ML: обучение завершено | "
-                    f"примеры: {result.get('samples', 0)}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"ℹ️ OLD ML: обучение пока не выполнено | "
-                    f"{result.get('reason', 'нет данных')}",
-                    flush=True,
-                )
-
-        elif labeled < 30:
-            print(
-                f"⏳ OLD ML: нужно минимум 30 подтверждённых "
-                f"примеров; сейчас {labeled}",
-                flush=True,
-            )
-
-        else:
-            print(
-                "ℹ️ OLD ML: новых результатов для обучения пока нет",
-                flush=True,
-            )
-
-    except Exception as e:
-        # Ошибка ML не должна останавливать основной бот.
-        print(
-            f"⚠️ OLD ML: ошибка обслуживания модели: {e}",
-            flush=True,
-        )
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
 
 
-# ============================================================
-# ПОЛУЧЕНИЕ LIVE-МАТЧЕЙ
-# ============================================================
+def first_value(data, *keys, default=0):
+    if not isinstance(data, dict):
+        return default
 
-def get_live_games():
-    try:
-        url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
+    for key in keys:
+        if key in data and data[key] is not None:
+            return data[key]
 
-        params = {
-            "cfView": 3,
-            "count": 40,
-            "fcountry": 1,
-            "gr": 2336,
-            "grMode": 4,
-            "lng": "ru",
-            "ref": 1,
-        }
+    return default
 
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            params=params,
-            timeout=15,
-        )
 
-        print(
-            f"🔎 1xlite HTTP: {response.status_code}",
-            flush=True,
-        )
+def sigmoid(value):
+    value = max(-30.0, min(30.0, number(value)))
+    return 1.0 / (1.0 + math.exp(-value))
 
-        if response.status_code != 200:
-            print(
-                f"❌ Ошибка 1xlite: {response.text[:200]}",
-                flush=True,
-            )
-            return []
 
-        data = response.json()
+def normalize(value, name):
+    scale = max(number(SCALES.get(name), 1.0), 1.0)
+    value = number(value) / scale
 
-        if not isinstance(data, list):
-            print(
-                f"❌ 1xlite вернул неожиданный тип: {type(data)}",
-                flush=True,
-            )
-            return []
+    # Защита от экстремальных значений.
+    return max(-5.0, min(5.0, value))
 
-        print(
-            f"📊 Матчей в ответе API: {len(data)}",
-            flush=True,
-        )
 
-        return [
-            game
-            for game in data
-            if isinstance(game, dict)
-        ]
+def get_strategy_name(strategy):
+    if isinstance(strategy, dict):
+        return str(
+            strategy.get("name")
+            or strategy.get("strategy")
+            or strategy.get("title")
+            or strategy.get("type")
+            or ""
+        ).strip().lower()
 
-    except Exception as e:
-        print(
-            f"❌ Ошибка получения матчей: {e}",
-            flush=True,
-        )
-        return []
+    return str(strategy or "").strip().lower()
+
+
+def get_odds(strategy, odds=None):
+    if odds is not None:
+        return number(odds)
+
+    if isinstance(strategy, dict):
+        for key in ("actual_odd", "odds", "odd", "coefficient"):
+            if strategy.get(key) is not None:
+                return number(strategy[key])
+
+    return 0.0
 
 
 # ============================================================
-# ОБРАБОТКА МАТЧЕЙ И СТРАТЕГИЙ
+# БАЗА ДАННЫХ МОДЕЛИ
 # ============================================================
 
-def monitor():
-    global p_game_cache, sent_signals, pending_checks
-    global last_scores, recent_snapshots
+def connect_model_db():
+    con = sqlite3.connect(MODEL_DB, timeout=15)
+    con.row_factory = sqlite3.Row
 
-    games = get_live_games()
-
-    if not games:
-        return
-
-    now_ts = int(time.time())
-
-    # Храним числовой ID и строковый ID.
-    p_game_cache = {}
-
-    for game in games:
-        if not isinstance(game, dict):
-            continue
-
-        gid = game.get("id")
-
-        if gid is not None:
-            p_game_cache[gid] = game
-            p_game_cache[str(gid)] = game
-
-    found_leagues = {}
-
-    for game in games:
-        lid = (game.get("liga") or {}).get("id")
-
-        if lid in LEAGUE_IDS:
-            found_leagues[lid] = (
-                found_leagues.get(lid, 0) + 1
-            )
-
-    if found_leagues:
-        for lid, count in found_leagues.items():
-            print(
-                f"🏆 {LEAGUE_IDS[lid]}: {count}",
-                flush=True,
-            )
-    else:
-        print(
-            "⚠️ В текущем ответе нет матчей из LEAGUE_IDS",
-            flush=True,
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ml_samples (
+            game_id TEXT PRIMARY KEY,
+            match_name TEXT,
+            strategy TEXT,
+            features_json TEXT NOT NULL,
+            odds REAL DEFAULT 0,
+            outcome INTEGER,
+            created_ts INTEGER NOT NULL,
+            labeled_ts INTEGER
         )
+    """)
 
-    for game in games:
-        try:
-            parsed = parse_game(game)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ml_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            weights_json TEXT NOT NULL,
+            bias REAL NOT NULL,
+            trained_samples INTEGER NOT NULL DEFAULT 0,
+            updated_ts INTEGER NOT NULL
+        )
+    """)
 
-            if not parsed:
-                continue
+    con.commit()
+    return con
 
-            gid = parsed["game_id"]
 
-            update_match_history(
-                parsed,
-                now_ts,
-                recent_snapshots,
-            )
+# ============================================================
+# ПОДГОТОВКА ПРИЗНАКОВ
+# ============================================================
 
-            if not common_ok(
-                parsed,
-                gid,
-                now_ts,
-                last_scores,
-            ):
-                continue
+def extract_features(match, strategy, odds=None):
+    if not isinstance(match, dict):
+        match = {}
 
-            # Порядок и пороги стратегий сохраняются.
-            for strategy_func in (
-                strategy_xg,
-                strategy_shots,
-                strategy_corners,
-                strategy_attacks,
-                strategy_combo,
-            ):
-                strategy = strategy_func(parsed)
+    strategy_name = get_strategy_name(strategy)
 
-                if not strategy:
-                    continue
+    home_score = number(first_value(
+        match, "home_score", "score_home", "home_goals",
+        "score1", "team1_score",
+    ))
+    away_score = number(first_value(
+        match, "away_score", "score_away", "away_goals",
+        "score2", "team2_score",
+    ))
 
-                # ML здесь не блокирует и не разрешает сигналы.
-                sent = try_send_signal(
-                    parsed,
-                    strategy,
-                    now_ts,
-                    p_game_cache,
-                    sent_signals,
-                    pending_checks,
-                )
+    home_xg = number(first_value(
+        match, "home_xg", "xg_home", "xG_home",
+        "home_expected_goals",
+    ))
+    away_xg = number(first_value(
+        match, "away_xg", "xg_away", "xG_away",
+        "away_expected_goals",
+    ))
 
-                if sent:
-                    break
+    home_shots_on = number(first_value(
+        match, "home_shots_on", "shots_on_home",
+        "home_shots_on_target", "shotsOnTarget1",
+    ))
+    away_shots_on = number(first_value(
+        match, "away_shots_on", "shots_on_away",
+        "away_shots_on_target", "shotsOnTarget2",
+    ))
 
-        except Exception as e:
-            print(
-                f"❌ Ошибка обработки отдельного матча "
-                f"{game.get('id')}: {e}",
-                flush=True,
-            )
+    home_shots = number(first_value(
+        match, "home_shots", "shots_home", "total_shots_home",
+    ))
+    away_shots = number(first_value(
+        match, "away_shots", "shots_away", "total_shots_away",
+    ))
 
-    # Очищаем старые антиспам-записи.
-    sent_signals = {
-        key: value
-        for key, value in sent_signals.items()
-        if now_ts - value.get("ts", now_ts) < 14400
+    home_attacks = number(first_value(
+        match, "home_attacks", "attacks_home",
+        "dangerous_attacks_home", "home_dangerous_attacks",
+    ))
+    away_attacks = number(first_value(
+        match, "away_attacks", "attacks_away",
+        "dangerous_attacks_away", "away_dangerous_attacks",
+    ))
+
+    home_corners = number(first_value(
+        match, "home_corners", "corners_home",
+    ))
+    away_corners = number(first_value(
+        match, "away_corners", "corners_away",
+    ))
+
+    home_red = number(first_value(
+        match, "home_red", "red_home", "home_red_cards",
+    ))
+    away_red = number(first_value(
+        match, "away_red", "red_away", "away_red_cards",
+    ))
+
+    minute = number(first_value(
+        match, "minute", "game_minute", "time_minute",
+    ))
+
+    trend = match.get("trend") or match.get("momentum") or {}
+    if not isinstance(trend, dict):
+        trend = {}
+
+    trend_available = bool(trend)
+
+    trend_xg = number(first_value(
+        trend, "xg", "trend_xg", "xg_delta",
+    ))
+    trend_shots_on = number(first_value(
+        trend, "shots_on", "shots_on_target", "trend_shots_on",
+    ))
+    trend_shots = number(first_value(
+        trend, "shots", "total_shots", "trend_shots",
+    ))
+    trend_corners = number(first_value(
+        trend, "corners", "trend_corners",
+    ))
+    trend_attacks = number(first_value(
+        trend, "attacks", "dangerous_attacks", "trend_attacks",
+    ))
+
+    # Поддерживаем названия стратегий, использовавшиеся в OLD.
+    strategy_xg = int("xg-мощь" in strategy_name or "xg" in strategy_name)
+    strategy_shots = int("удары" in strategy_name or "shots" in strategy_name)
+    strategy_corners = int("углы" in strategy_name or "corners" in strategy_name)
+    strategy_attacks = int(
+        "опасные атаки" in strategy_name or "атаки" in strategy_name
+    )
+    strategy_combo = int("комбо" in strategy_name or "combo" in strategy_name)
+
+    raw = {
+        "minute": minute,
+        "score_total": home_score + away_score,
+        "score_diff": home_score - away_score,
+        "xg_total": home_xg + away_xg,
+        "xg_diff": home_xg - away_xg,
+        "shots_on_total": home_shots_on + away_shots_on,
+        "shots_on_diff": home_shots_on - away_shots_on,
+        "shots_total": home_shots + away_shots,
+        "shots_diff": home_shots - away_shots,
+        "attacks_total": home_attacks + away_attacks,
+        "attacks_diff": home_attacks - away_attacks,
+        "corners_total": home_corners + away_corners,
+        "corners_diff": home_corners - away_corners,
+        "red_total": home_red + away_red,
+        "trend_available": int(trend_available),
+        "trend_xg": trend_xg,
+        "trend_shots_on": trend_shots_on,
+        "trend_shots": trend_shots,
+        "trend_corners": trend_corners,
+        "trend_attacks": trend_attacks,
+        "strategy_xg": strategy_xg,
+        "strategy_shots": strategy_shots,
+        "strategy_corners": strategy_corners,
+        "strategy_attacks": strategy_attacks,
+        "strategy_combo": strategy_combo,
+        "odds": get_odds(strategy, odds),
+    }
+
+    return {
+        name: normalize(raw.get(name, 0), name)
+        for name in FEATURE_NAMES
     }
 
 
 # ============================================================
-# РАСПИСАНИЕ
+# СОХРАНЕНИЕ ПРИЗНАКОВ СИГНАЛА
 # ============================================================
 
-def refresh_schedule_if_needed():
-    global schedule_windows, schedule_updated_at
+def observe(match, strategy, odds=None):
+    """
+    Сохраняет признаки отправленного сигнала.
+    Возвращает True, если добавлена новая запись.
+    ML не влияет на отправку сигнала.
+    """
+    if not isinstance(match, dict):
+        return False
 
-    now = datetime.now(MOSCOW_TZ)
-
-    if (
-        schedule_updated_at
-        and (now - schedule_updated_at).total_seconds()
-        < SCHEDULE_REFRESH_SEC
-    ):
-        return
-
-    try:
-        schedule = get_today_schedule()
-        schedule_windows = get_windows(schedule)
-        schedule_updated_at = now
-
-        print(
-            f"📅 Расписание обновлено. "
-            f"Окон: {len(schedule_windows)}",
-            flush=True,
-        )
-
-    except Exception as e:
-        print(
-            f"⚠️ Не удалось обновить расписание: {e}",
-            flush=True,
-        )
-
-
-def is_match_time():
-    # Оставляем прежнее поведение:
-    # мониторинг не зависит от расписания Ruscore.
-    return True
-
-
-# ============================================================
-# ВЕБ-СЕРВЕР
-# ============================================================
-
-def run_web():
-    try:
-        web.app.run(
-            host="0.0.0.0",
-            port=3000,
-            use_reloader=False,
-            threaded=True,
-        )
-
-    except Exception as e:
-        print(
-            f"❌ Ошибка запуска сайта: {e}",
-            flush=True,
-        )
-
-
-# ============================================================
-# ГЛАВНЫЙ ЦИКЛ
-# ============================================================
-
-def bot_loop():
-    print("🚀 LIVE-БОТ OLD ЗАПУЩЕН", flush=True)
-    print(
-        "🧠 OLD ML: теневой режим; "
-        "модель не фильтрует сигналы",
-        flush=True,
+    game_id = first_value(
+        match, "game_id", "id", "gameId", default=None
     )
 
-    while True:
-        try:
-            now = datetime.now(MOSCOW_TZ)
-            now_str = now.strftime("%H:%M")
+    if game_id is None or str(game_id).strip() == "":
+        print("⚠️ OLD ML: у сигнала отсутствует game_id", flush=True)
+        return False
 
-            # Проверяем исходы независимо от режима мониторинга.
-            check_pending_results(pending_checks)
+    strategy_name = get_strategy_name(strategy)
+    actual_odds = get_odds(strategy, odds)
+    features = extract_features(match, strategy, actual_odds)
 
-            # Периодически синхронизируем результаты и обучаем ML.
-            maintain_ml()
+    match_name = (
+        match.get("match_name")
+        or match.get("name")
+        or match.get("match")
+        or ""
+    )
 
-            if SLEEP_HOUR_START <= now.hour < SLEEP_HOUR_END:
-                print(
-                    f"😴 Ночной режим ({now_str}); "
-                    "проверка результатов продолжается",
-                    flush=True,
-                )
-                time.sleep(60)
-                continue
+    if not match_name:
+        home = first_value(
+            match, "home", "home_name", "team1", default=""
+        )
+        away = first_value(
+            match, "away", "away_name", "team2", default=""
+        )
+        match_name = f"{home} — {away}".strip(" —")
 
-            refresh_schedule_if_needed()
+    con = None
 
-            if is_match_time():
-                monitor()
+    try:
+        con = connect_model_db()
 
-            # Повторная проверка результатов после мониторинга.
-            check_pending_results(pending_checks)
+        cursor = con.execute("""
+            INSERT OR IGNORE INTO ml_samples (
+                game_id, match_name, strategy, features_json,
+                odds, outcome, created_ts, labeled_ts
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)
+        """, (
+            str(game_id),
+            str(match_name),
+            strategy_name,
+            json.dumps(features, ensure_ascii=False),
+            actual_odds,
+            int(time.time()),
+        ))
 
-            # Если результат был подтверждён во время второй
-            # проверки, обслуживание ML выполнится по расписанию.
-            time.sleep(UPDATE_INTERVAL)
+        con.commit()
+        return cursor.rowcount > 0
 
-        except KeyboardInterrupt:
-            print("⏹️ Остановка по команде", flush=True)
-            break
+    except Exception as e:
+        print(f"⚠️ OLD ML: ошибка сохранения признаков: {e}", flush=True)
+        return False
 
-        except Exception as e:
+    finally:
+        if con:
+            con.close()
+
+
+# ============================================================
+# СИНХРОНИЗАЦИЯ ПОДТВЕРЖДЁННЫХ РЕЗУЛЬТАТОВ
+# ============================================================
+
+def sync_confirmed_results():
+    """
+    Переносит подтверждённые WIN/LOSE из основной базы.
+    Схема основной таблицы проверяется перед чтением.
+    Возвращает количество новых размеченных примеров.
+    """
+    if not os.path.isfile(BOT_DB):
+        return 0
+
+    source = None
+    target = None
+    changed = 0
+
+    try:
+        source = sqlite3.connect(BOT_DB, timeout=15)
+        source.row_factory = sqlite3.Row
+
+        table = source.execute("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'live_signals'
+        """).fetchone()
+
+        if not table:
             print(
-                f"❌ Ошибка основного цикла: {e}",
+                "⚠️ OLD ML: в основной базе нет таблицы live_signals",
                 flush=True,
             )
+            return 0
 
-            import traceback
-            traceback.print_exc()
+        columns = {
+            row["name"]
+            for row in source.execute(
+                "PRAGMA table_info(live_signals)"
+            ).fetchall()
+        }
 
-            try:
-                check_pending_results(pending_checks)
-            except Exception as check_error:
-                print(
-                    f"❌ Ошибка проверки результатов: "
-                    f"{check_error}",
-                    flush=True,
-                )
+        game_col = next(
+            (c for c in ("game_id", "match_id", "event_id") if c in columns),
+            None,
+        )
+        status_col = next(
+            (c for c in ("status", "result", "outcome") if c in columns),
+            None,
+        )
 
-            # Ошибки ML обрабатываются отдельно.
-            try:
-                maintain_ml()
-            except Exception as ml_error:
-                print(
-                    f"⚠️ OLD ML: ошибка обслуживания: {ml_error}",
-                    flush=True,
-                )
+        if not game_col or not status_col:
+            print(
+                "⚠️ OLD ML: не найдены поля ID матча или результата "
+                "в live_signals",
+                flush=True,
+            )
+            return 0
 
-            time.sleep(30)
+        # Имена колонок берутся только из списка реальных полей таблицы.
+        rows = source.execute(
+            f'SELECT "{game_col}" AS game_id, '
+            f'"{status_col}" AS status '
+            f'FROM live_signals '
+            f'WHERE UPPER("{status_col}") IN (?, ?)',
+            ("WIN", "LOSE"),
+        ).fetchall()
+
+        target = connect_model_db()
+
+        for row in rows:
+            game_id = row["game_id"]
+            status = str(row["status"] or "").strip().upper()
+
+            if game_id is None:
+                continue
+
+            if status == "WIN":
+                outcome = 1
+            elif status == "LOSE":
+                outcome = 0
+            else:
+                continue
+
+            cursor = target.execute("""
+                UPDATE ml_samples
+                SET outcome = ?, labeled_ts = ?
+                WHERE game_id = ? AND outcome IS NULL
+            """, (
+                outcome,
+                int(time.time()),
+                str(game_id),
+            ))
+
+            changed += max(cursor.rowcount, 0)
+
+        target.commit()
+        return changed
+
+    except Exception as e:
+        print(
+            f"⚠️ OLD ML: ошибка синхронизации результатов: {e}",
+            flush=True,
+        )
+        return 0
+
+    finally:
+        if source:
+            source.close()
+        if target:
+            target.close()
 
 
 # ============================================================
-# ЗАПУСК
+# СОСТОЯНИЕ МОДЕЛИ
 # ============================================================
 
-if __name__ == "__main__":
-    db.init_db()
+def load_state(con):
+    row = con.execute("""
+        SELECT weights_json, bias, trained_samples
+        FROM ml_state
+        WHERE id = 1
+    """).fetchone()
 
-    # Восстанавливаем незавершённые сигналы из базы.
-    pending_checks.update(restore_pending_checks())
+    if not row:
+        return [0.0] * len(FEATURE_NAMES), 0.0, 0
 
-    # При запуске сразу синхронизируем результаты.
-    # Если накоплены новые размеченные данные, модель обучится.
-    maintain_ml(force=True)
+    try:
+        weights = json.loads(row["weights_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        weights = [0.0] * len(FEATURE_NAMES)
 
-    web_thread = threading.Thread(
-        target=run_web,
-        daemon=True,
-    )
-    web_thread.start()
+    if not isinstance(weights, list) or len(weights) != len(FEATURE_NAMES):
+        weights = [0.0] * len(FEATURE_NAMES)
 
-    bot_loop()
+    weights = [number(value) for value in weights]
+    bias = number(row["bias"])
+    trained_samples = int(number(row["trained_samples"]))
+
+    return weights, bias, trained_samples
+
+
+def save_state(con, weights, bias, sample_count):
+    now_ts = int(time.time())
+    weights_json = json.dumps(weights)
+
+    con.execute("""
+        INSERT INTO ml_state (
+            id, weights_json, bias, trained_samples, updated_ts
+        )
+        VALUES (1, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            weights_json = excluded.weights_json,
+            bias = excluded.bias,
+            trained_samples = excluded.trained_samples,
+            updated_ts = excluded.updated_ts
+    """, (
+        weights_json,
+        float(bias),
+        int(sample_count),
+        now_ts,
+    ))
+
+    con.commit()
+
+    # Отдельный JSON нужен для просмотра состояния модели.
+    model_path = Path(MODEL_FILE)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = model_path.with_suffix(model_path.suffix + ".tmp")
+
+    payload = {
+        "model": "OLD shadow logistic regression",
+        "feature_names": FEATURE_NAMES,
+        "weights": weights,
+        "bias": float(bias),
+        "trained_samples": int(sample_count),
+        "updated_ts": now_ts,
+    }
+
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, model_path)
+    except Exception as e:
+        print(f"⚠️ OLD ML: не удалось сохранить JSON модели: {e}", flush=True)
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+# ============================================================
+# ОБУЧЕНИЕ — ЛОГИСТИЧЕСКАЯ РЕГРЕССИЯ НА SGD
+# ============================================================
+
+def train():
+    con = None
+
+    try:
+        con = connect_model_db()
+
+        rows = con.execute("""
+            SELECT features_json, outcome
+            FROM ml_samples
+            WHERE outcome IN (0, 1)
+            ORDER BY labeled_ts ASC, created_ts ASC
+        """).fetchall()
+
+        samples = []
+
+        for row in rows:
+            try:
+                feature_dict = json.loads(row["features_json"])
+                vector = [
+                    number(feature_dict.get(name, 0))
+                    for name in FEATURE_NAMES
+                ]
+                outcome = int(row["outcome"])
+
+                if outcome not in (0, 1):
+                    continue
+
+                samples.append((vector, outcome))
+
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+        sample_count = len(samples)
+
+        if sample_count < MIN_TRAINING_SAMPLES:
+            return {
+                "trained": False,
+                "samples": sample_count,
+                "reason": "мало подтверждённых примеров",
+            }
+
+        weights, bias, previous_samples = load_state(con)
+
+        # Несколько проходов по сохранённым подтверждённым исходам.
+        for _ in range(EPOCHS):
+            for vector, target in samples:
+                prediction = sigmoid(
+                    sum(w * x for w, x in zip(weights, vector)) + bias
+                )
+                error = prediction - target
+
+                for i, value in enumerate(vector):
+                    gradient = error * value + L2 * weights[i]
+                    weights[i] -= LEARNING_RATE * gradient
+
+                bias -= LEARNING_RATE * error
+
+        save_state(con, weights, bias, sample_count)
+
+        return {
+            "trained": True,
+            "samples": sample_count,
+            "previous_samples": previous_samples,
+        }
+
+    except Exception as e:
+        print(f"⚠️ OLD ML: ошибка обучения: {e}", flush=True)
+        return {
+            "trained": False,
+            "samples": 0,
+            "reason": str(e),
+        }
+
+    finally:
+        if con:
+            con.close()
+
+
+# ============================================================
+# ПРОГНОЗ МОДЕЛИ — ТОЛЬКО ДЛЯ АНАЛИЗА
+# ============================================================
+
+def predict(match, strategy, odds=None):
+    """
+    Возвращает вероятность от 0 до 1.
+    Эта функция не отправляет и не блокирует сигналы.
+    """
+    con = None
+
+    try:
+        con = connect_model_db()
+        weights, bias, trained_samples = load_state(con)
+
+        if trained_samples < MIN_TRAINING_SAMPLES:
+            return None
+
+        features = extract_features(match, strategy, odds)
+        vector = [features.get(name, 0.0) for name in FEATURE_NAMES]
+
+        probability = sigmoid(
+            sum(w * x for w, x in zip(weights, vector)) + bias
+        )
+
+        return round(probability, 4)
+
+    except Exception as e:
+        print(f"⚠️ OLD ML: ошибка расчёта вероятности: {e}", flush=True)
+        return None
+
+    finally:
+        if con:
+            con.close()
+
+
+# ============================================================
+# СТАТИСТИКА МОДЕЛИ
+# ============================================================
+
+def status():
+    con = None
+
+    try:
+        con = connect_model_db()
+
+        row = con.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) AS labeled,
+                SUM(CASE WHEN outcome = 1 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN outcome = 0 THEN 1 ELSE 0 END) AS losses
+            FROM ml_samples
+        """).fetchone()
+
+        _, _, trained_samples = load_state(con)
+
+        return {
+            "total": int(row["total"] or 0),
+            "labeled": int(row["labeled"] or 0),
+            "wins": int(row["wins"] or 0),
+            "losses": int(row["losses"] or 0),
+            "trained_samples": trained_samples,
+        }
+
+    except Exception as e:
+        print(f"⚠️ OLD ML: ошибка чтения статистики: {e}", flush=True)
+        return {
+            "total": 0,
+            "labeled": 0,
+            "wins": 0,
+            "losses": 0,
+            "trained_samples": 0,
+        }
+
+    finally:
+        if con:
+            con.close()
