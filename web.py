@@ -1,166 +1,297 @@
+
+import json
+from datetime import datetime
 from flask import Flask, render_template_string
 import database as db
-from datetime import datetime
-from collections import defaultdict
-import os
 
 app = Flask(__name__)
 
-# =====================================================================
-# HTML ШАБЛОН С ТВОИМ ФОНОМ
-# =====================================================================
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+HTML_TEMPLATE = r"""
+<!doctype html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Статистика Live-Бота</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { 
-            font-family: Inter, Arial, sans-serif; 
-            
-            /* 🔥 ФОН С ТВОЕЙ КАРТИНКОЙ */
-            background-image: url('https://raw.githubusercontent.com/t1mwatson-bel/foot_live/main/IMG_1843.png');
-            background-size: cover;
-            background-position: center;
-            background-attachment: fixed;
-            background-color: #03050a;
-            
-            color: #fff; 
-            margin: 0; 
-            padding: 20px; 
-            min-height: 100vh; 
-        }
-        
-                /* Затемнение, чтобы текст читался (сделали чуть прозрачнее) */
-        body::before {
-            content: "";
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.5); /* Было 0.75, стало 0.5 */
-            z-index: -1;
-        }
-        
-        .container { max-width: 1400px; margin: auto; padding-top: 120px; }
-        .header { text-align: center; margin-bottom: 30px; }
-        .logo { font-size: 32px; font-weight: 900; letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 200, 255, .6); }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px; }
-        
-        /* КАРТОЧКИ (сделали прозрачными и размытыми) */
-        .card { 
-            background: rgba(30, 41, 59, 0.4); /* Прозрачность 40% */
-            backdrop-filter: blur(12px);       /* Эффект матового стекла */
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.15); /* Светлая рамка */
-            border-radius: 18px; 
-            padding: 22px; 
-            text-align: center; 
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); 
-        }
-        .card h3 { color: #e2e8f0; font-size: 13px; margin-bottom: 10px; text-transform: uppercase; }
-        .val { font-size: 32px; font-weight: 800; }
-        .green { color: #4cff9b; text-shadow: 0 0 12px rgba(76, 255, 155, .7); }
-        .red { color: #ff5d70; text-shadow: 0 0 12px rgba(255, 93, 112, .7); }
-        .orange { color: #ffbd66; }
-        
-        /* СЕКЦИИ (График и Таблица) */
-        .section { 
-            background: rgba(30, 41, 59, 0.4); /* Прозрачность 40% */
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.15); 
-            border-radius: 20px; 
-            padding: 22px; 
-            margin-bottom: 25px; 
-        }
-        .section-title { font-size: 20px; font-weight: 800; margin-bottom: 18px; text-shadow: 0 0 8px rgba(0, 255, 200, .5); }
-        .chart-container { height: 300px; }
-        table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; color: #7e8ba0; font-size: 12px; text-transform: uppercase; padding: 13px; border-bottom: 1px solid rgba(0, 200, 255, .15); }
-        td { padding: 14px 13px; border-bottom: 1px solid rgba(255, 255, 255, .05); font-size: 14px; }
-        tr:hover td { background: rgba(0, 200, 255, .04); }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<title>OLD — Live Statistics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #090d18;
+  --panel: #111827;
+  --panel2: #151f31;
+  --border: #25334a;
+  --text: #eef3ff;
+  --muted: #96a5bd;
+  --green: #41e6a1;
+  --red: #ff6b81;
+  --blue: #6da8ff;
+  --yellow: #ffd36b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: radial-gradient(ellipse at top, #17233b 0, var(--bg) 60%);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+}
+.wrap { width: min(1250px, 94%); margin: 0 auto; padding: 28px 0 50px; }
+header {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 24px;
+}
+.logo { font-size: 27px; font-weight: 900; letter-spacing: 2px; }
+.logo span { color: var(--blue); }
+.sub { color: var(--muted); font-size: 13px; margin-top: 5px; }
+.updated { color: var(--muted); font-size: 12px; }
+.cards {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px; margin-bottom: 18px;
+}
+.card, .panel {
+  background: linear-gradient(145deg, var(--panel2), var(--panel));
+  border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: 0 10px 35px #0002;
+}
+.card { padding: 18px; min-width: 0; }
+.card .label { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.card .value { font-size: clamp(20px, 2.5vw, 29px); font-weight: 800; overflow-wrap: anywhere; }
+.green { color: var(--green); }
+.red { color: var(--red); }
+.blue { color: var(--blue); }
+.yellow { color: var(--yellow); }
+.panel { padding: 20px; margin-bottom: 18px; }
+.panel h2 { margin: 0 0 16px; font-size: 17px; }
+.chart-wrap { height: 260px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 760px; }
+th, td {
+  padding: 13px 12px; border-bottom: 1px solid var(--border);
+  text-align: left; font-size: 13px; vertical-align: top;
+}
+th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+tr:last-child td { border-bottom: 0; }
+.match { font-weight: 700; min-width: 190px; }
+.small { color: var(--muted); font-size: 11px; margin-top: 5px; }
+.pill {
+  display: inline-block; padding: 5px 9px; border-radius: 20px;
+  font-size: 11px; font-weight: 800; white-space: nowrap;
+}
+.pill-WIN { color: var(--green); background: #41e6a118; }
+.pill-LOSE { color: var(--red); background: #ff6b8118; }
+.pill-PENDING { color: var(--yellow); background: #ffd36b18; }
+.empty { text-align: center; padding: 32px; color: var(--muted); }
+footer { text-align: center; color: var(--muted); font-size: 12px; padding-top: 8px; }
+@media (max-width: 850px) {
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card:last-child { grid-column: span 2; }
+  .panel { padding: 14px; }
+}
+</style>
 </head>
 <body>
-<div class="container">
-    <div class="header"><div class="logo">🔴 LIVE-БОТ СТАТИСТИКА</div></div>
-    <div class="grid">
-        <div class="card"><h3>Профит</h3><div class="val {{ 'green' if total_profit >= 0 else 'red' }}">{{ "%+.2f"|format(total_profit) }}</div></div>
-        <div class="card"><h3>ROI</h3><div class="val {{ 'green' if roi >= 0 else 'red' }}">{{ "%.1f"|format(roi) }}%</div></div>
-        <div class="card"><h3>Зашло / Не зашло</h3><div class="val"><span class="green">{{ wins }}</span> / <span class="red">{{ loses }}</span></div></div>
-        <div class="card"><h3>В ожидании</h3><div class="val orange">{{ pendings }}</div></div>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="logo"><span>OLD</span> LIVE STATS</div>
+      <div class="sub">Статистика прогнозов на следующий гол до конца матча</div>
     </div>
-    <div class="section">
-        <div class="section-title">📈 График профита</div>
-        <div class="chart-container"><canvas id="profitChart"></canvas></div>
+    <div class="updated">Обновлено: {{ updated }}</div>
+  </header>
+
+  <section class="cards">
+    <div class="card">
+      <div class="label">Всего прогнозов</div>
+      <div class="value">{{ total }}</div>
     </div>
-    <div class="section">
-        <div class="section-title">📜 Все сигналы</div>
-        <table>
-            <thead><tr><th>Дата</th><th>Матч</th><th>Лига</th><th>Стратегия</th><th>Кэф</th><th>Статус</th><th>Профит</th></tr></thead>
-            <tbody>
-                {% for s in signals %}
-                <tr>
-                    <td>{{ s.sent_at | timestamp_to_date }}</td>
-                    <td><strong>{{ s.match_name }}</strong></td>
-                    <td>{{ s.league }}</td>
-                    <td><span style="color: #65aaff">{{ s.strategy }}</span></td>
-                    <td>{{ "%.2f"|format(s.odds) }}</td>
-                    <td class="{{ 'green' if s.status=='WIN' else 'red' if s.status=='LOSE' else 'orange' }}">{{ s.status }}</td>
-                    <td class="{{ 'green' if s.profit>0 else 'red' if s.profit<0 else '' }}">{{ "%+.2f"|format(s.profit) }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+    <div class="card">
+      <div class="label">Зашло</div>
+      <div class="value green">{{ wins }}</div>
     </div>
+    <div class="card">
+      <div class="label">Не зашло</div>
+      <div class="value red">{{ loses }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Ожидают результата</div>
+      <div class="value yellow">{{ pending }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Проходимость</div>
+      <div class="value blue">{{ accuracy }}%</div>
+      <div class="small">Только завершённые прогнозы</div>
+    </div>
+  </section>
+
+  <section class="cards">
+    <div class="card" style="grid-column: span 2">
+      <div class="label">Общая прибыль, условные единицы</div>
+      <div class="value {{ 'green' if profit >= 0 else 'red' }}">
+        {{ '%+.2f'|format(profit) }}
+      </div>
+    </div>
+    <div class="card" style="grid-column: span 3">
+      <div class="label">ROI по завершённым прогнозам</div>
+      <div class="value {{ 'green' if roi >= 0 else 'red' }}">{{ '%+.2f'|format(roi) }}%</div>
+      <div class="small">Расчёт по единичной ставке на каждый завершённый сигнал</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Накопленная прибыль</h2>
+    <div class="chart-wrap"><canvas id="profitChart"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <h2>История лайв-прогнозов</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Время</th><th>Матч</th><th>Лига</th><th>Стратегия</th>
+            <th>Счёт при сигнале</th><th>Коэффициент</th><th>Результат</th><th>Прибыль</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for s in signals %}
+          <tr>
+            <td>
+              {{ s.sent_at_text }}
+              <div class="small">{{ s.minute or 0 }}'</div>
+            </td>
+            <td class="match">
+              {{ s.match_name or 'Матч не указан' }}
+              {% if s.final_score %}
+                <div class="small">Итог: {{ s.final_score }}</div>
+              {% endif %}
+            </td>
+            <td>{{ s.league or '—' }}</td>
+            <td>{{ s.strategy or '—' }}</td>
+            <td>{{ s.score or '—' }}</td>
+            <td>{{ '%.2f'|format(s.odds|float) if s.odds is not none else '—' }}</td>
+            <td><span class="pill pill-{{ s.status }}">{{ status_labels.get(s.status, s.status) }}</span></td>
+            <td class="{{ 'green' if s.profit|float > 0 else ('red' if s.profit|float < 0 else '') }}">
+              {{ '%+.2f'|format(s.profit|float) }}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="empty">Пока нет записанных лайв-прогнозов</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  <footer>OLD · Статистика рассчитывается по данным SQLite</footer>
 </div>
+
 <script>
-    new Chart(document.getElementById('profitChart').getContext('2d'), {
-        type: 'line',
-        data: { labels: {{ chart_labels | safe }}, datasets: [{ label: 'Профит', data: {{ chart_data | safe }}, borderColor: '#00ffe0', backgroundColor: 'rgba(0, 255, 224, 0.1)', borderWidth: 3, fill: true, tension: 0.3 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#1e293b' }, ticks: { color: '#64748b' } }, x: { grid: { display: false }, ticks: { color: '#64748b' } } } }
-    });
+const labels = {{ chart_labels|safe }};
+const values = {{ chart_data|safe }};
+const ctx = document.getElementById('profitChart');
+new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels,
+    datasets: [{
+      label: 'Накопленная прибыль',
+      data: values,
+      borderColor: '#6da8ff',
+      backgroundColor: 'rgba(109,168,255,0.12)',
+      fill: true,
+      tension: 0.25,
+      pointRadius: 3
+    }]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#eef3ff' } } },
+    scales: {
+      x: { ticks: { color: '#96a5bd' }, grid: { color: '#25334a' } },
+      y: { ticks: { color: '#96a5bd' }, grid: { color: '#25334a' } }
+    }
+  }
+});
 </script>
 </body>
 </html>
 """
 
-@app.template_filter('timestamp_to_date')
-def timestamp_to_date(ts):
-    if not ts: return "-"
-    return datetime.fromtimestamp(ts).strftime('%d.%m %H:%M')
 
-@app.route('/')
+@app.route("/")
 def index():
-    signals = db.get_all_signals() # Тянем из базы
-    wins = sum(1 for s in signals if s['status'] == 'WIN')
-    loses = sum(1 for s in signals if s['status'] == 'LOSE')
-    pendings = sum(1 for s in signals if s['status'] == 'PENDING')
-    total_profit = sum(s['profit'] for s in signals)
-    total_bets = wins + loses
-    roi = (total_profit / total_bets * 100) if total_bets > 0 else 0.0
+    all_rows = db.get_live_signals()
 
-    daily_profit = defaultdict(float)
-    for s in signals:
-        if s['status'] in ['WIN', 'LOSE']:
-            day = datetime.fromtimestamp(s['sent_at']).strftime('%d.%m')
-            daily_profit[day] += s['profit']
-    
-    chart_labels, chart_data = [], []
-    cumulative = 0
-    for day in sorted(daily_profit.keys(), key=lambda d: datetime.strptime(d, '%d.%m')):
-        cumulative += daily_profit[day]
-        chart_labels.append(day)
+    # Скрываем технические записи без названия матча.
+    signals = [
+        row for row in all_rows
+        if row.get("game_id") and row.get("match_name")
+    ]
+
+    wins = sum(1 for row in signals if row.get("status") == "WIN")
+    loses = sum(1 for row in signals if row.get("status") == "LOSE")
+    pending = sum(1 for row in signals if row.get("status") == "PENDING")
+    settled = wins + loses
+
+    profit = sum(float(row.get("profit") or 0) for row in signals)
+    accuracy = round(wins / settled * 100, 2) if settled else 0.0
+    roi = round(profit / settled * 100, 2) if settled else 0.0
+
+    for row in signals:
+        timestamp = row.get("sent_at")
+        try:
+            row["sent_at_text"] = datetime.fromtimestamp(
+                int(timestamp)
+            ).strftime("%d.%m.%Y %H:%M")
+        except (TypeError, ValueError, OSError):
+            row["sent_at_text"] = "—"
+
+    # Строим график по времени, а не сортируем только по дню месяца.
+    settled_rows = sorted(
+        (
+            row for row in signals
+            if row.get("status") in ("WIN", "LOSE")
+        ),
+        key=lambda row: int(row.get("result_updated_at") or row.get("sent_at") or 0),
+    )
+
+    chart_labels = []
+    chart_data = []
+    cumulative = 0.0
+
+    for row in settled_rows:
+        timestamp = row.get("result_updated_at") or row.get("sent_at")
+        try:
+            label = datetime.fromtimestamp(int(timestamp)).strftime("%d.%m %H:%M")
+        except (TypeError, ValueError, OSError):
+            label = "—"
+
+        cumulative += float(row.get("profit") or 0)
+        chart_labels.append(label)
         chart_data.append(round(cumulative, 2))
 
-    return render_template_string(HTML_TEMPLATE, signals=signals, wins=wins, loses=loses, pendings=pendings, total_profit=total_profit, roi=roi, chart_labels=str(chart_labels).replace("'", '"'), chart_data=chart_data)
+    return render_template_string(
+        HTML_TEMPLATE,
+        signals=signals,
+        total=len(signals),
+        wins=wins,
+        loses=loses,
+        pending=pending,
+        accuracy=accuracy,
+        profit=profit,
+        roi=roi,
+        updated=datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+        chart_labels=json.dumps(chart_labels, ensure_ascii=False),
+        chart_data=json.dumps(chart_data),
+        status_labels={
+            "WIN": "ЗАШЛО",
+            "LOSE": "НЕ ЗАШЛО",
+            "PENDING": "ОЖИДАНИЕ",
+        },
+    )
 
-@app.route('/health')
-def health():
-    return "OK", 200
 
-if __name__ == '__main__':
-    # Порт 3000, так как Bothost требует именно его
-    app.run(host='0.0.0.0', port=3000)
+if __name__ == "__main__":
+    db.init_db()
+    app.run(host="0.0.0.0", port=3000, use_reloader=False)
