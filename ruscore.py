@@ -1,4 +1,3 @@
-```python
 import requests
 from datetime import datetime, timedelta
 
@@ -306,4 +305,3 @@ def get_windows(schedule):
             merged.append((start, end))
 
     return merged
-```
