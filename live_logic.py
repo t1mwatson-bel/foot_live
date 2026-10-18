@@ -1,5 +1,6 @@
 import time
 import json
+import goal_model as ml
 import re
 import requests
 from datetime import datetime, timedelta
