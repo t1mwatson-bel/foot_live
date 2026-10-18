@@ -19,11 +19,17 @@ def log_result_record(record):
 
 
 def restore_pending_checks():
-    """Восстанавливает незавершённые проверки из SQLite после запуска."""
+    """Восстанавливает ожидающие проверки после перезапуска."""
     restored = {}
     now = int(time.time())
 
-    for row in db.get_pending_live_signals():
+    try:
+        rows = db.get_pending_live_signals()
+    except Exception as e:
+        print(f"❌ Не удалось загрузить проверки из БД: {e}", flush=True)
+        return restored
+
+    for row in rows:
         game_id = str(row.get("game_id") or "")
         team1 = row.get("team1")
         team2 = row.get("team2")
@@ -32,15 +38,14 @@ def restore_pending_checks():
         message_id = row.get("message_id")
         base_text = row.get("base_text") or ""
 
-        # Старые записи без нужных данных нельзя проверять достоверно.
         if (
             not game_id or not team1 or not team2
             or old_s1 is None or old_s2 is None
             or not message_id or not base_text
         ):
             print(
-                f"⚠️ Невозможно восстановить проверку старого сигнала "
-                f"{game_id}: в базе не хватает данных",
+                f"⚠️ Сигнал {game_id}: недостаточно данных "
+                "для автоматического восстановления проверки",
                 flush=True,
             )
             continue
@@ -49,7 +54,9 @@ def restore_pending_checks():
             "team1": team1,
             "team2": team2,
             "match": row.get("match_name") or f"{team1} — {team2}",
-            "date_str": row.get("date_str") or datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d"),
+            "date_str": row.get("date_str") or datetime.now(
+                MOSCOW_TZ
+            ).strftime("%Y-%m-%d"),
             "old_s1": int(old_s1),
             "old_s2": int(old_s2),
             "minute": int(row.get("minute") or 0),
@@ -62,38 +69,150 @@ def restore_pending_checks():
             "attempts": int(row.get("attempts") or 0),
         }
 
-    print(f"♻️ Восстановлено проверок: {len(restored)}", flush=True)
+    print(f"♻️ Восстановлено ожидающих проверок: {len(restored)}", flush=True)
     return restored
 
 
 def persist_check(game_id, info):
-    """Сохраняет изменившееся состояние текущей проверки."""
-    db.update_live_signal_check(game_id, {
-        "team1": info.get("team1"),
-        "team2": info.get("team2"),
-        "old_s1": info.get("old_s1"),
-        "old_s2": info.get("old_s2"),
-        "date_str": info.get("date_str"),
-        "signal_ts": info.get("signal_ts"),
-        "message_id": info.get("message_id"),
-        "base_text": info.get("base_text"),
-        "check_after": info.get("check_after"),
-        "attempts": info.get("attempts", 0),
-    })
+    """Сохраняет состояние проверки в базе."""
+    try:
+        return db.update_live_signal_check(str(game_id), {
+            "team1": info.get("team1"),
+            "team2": info.get("team2"),
+            "old_s1": info.get("old_s1"),
+            "old_s2": info.get("old_s2"),
+            "date_str": info.get("date_str"),
+            "signal_ts": info.get("signal_ts"),
+            "message_id": info.get("message_id"),
+            "base_text": info.get("base_text"),
+            "check_after": info.get("check_after"),
+            "attempts": info.get("attempts", 0),
+        })
+    except Exception as e:
+        print(f"❌ Не удалось сохранить проверку {game_id}: {e}", flush=True)
+        return False
 
 
 def is_finished_status(status):
-    status = str(status or "").strip().lower().replace("ё", "е")
+    """Проверяет распространённые статусы окончания матча."""
+    if isinstance(status, dict):
+        parts = [str(value) for value in status.values()]
+        text = " ".join(parts)
+    else:
+        text = str(status or "")
+
+    text = text.strip().lower().replace("ё", "е")
+    text = " ".join(text.replace("_", " ").replace("-", " ").split())
+
     finished_values = {
         "finished", "ended", "ft", "final", "complete", "completed",
+        "full time", "match finished", "match ended",
         "завершен", "матч завершен", "окончен", "закончен",
         "матч окончен", "матч закончен",
     }
-    return status in finished_values
+
+    if text in finished_values:
+        return True
+
+    # Англоязычные статусы с дополнительным текстом.
+    if text.startswith(("finished ", "ended ", "completed ", "full time ")):
+        return True
+
+    # Русские статусы с дополнительным текстом.
+    if text.startswith(("завершен ", "матч завершен ", "окончен ", "закончен ")):
+        return True
+
+    return False
+
+
+def _schedule_retry(key, info, now, delay=None):
+    """Планирует повторную проверку, не объявляя неизвестный исход проигрышем."""
+    info["attempts"] = int(info.get("attempts", 0)) + 1
+
+    if delay is None:
+        delay = CHECK_REPEAT_AFTER
+
+    # Если матч долго не удаётся найти, продолжаем реже, но не бросаем его.
+    if info["attempts"] >= CHECK_MAX_ATTEMPTS:
+        delay = max(int(delay), 3600)
+
+    info["check_after"] = now + max(1, int(delay))
+    persist_check(key, info)
+
+
+def _finish_signal(key, info, won, score1, score2, now):
+    """Фиксирует результат в БД и обновляет сообщение Telegram."""
+    final_score = f"{score1}-{score2}"
+
+    if won:
+        elapsed = max(0, (now - int(info["signal_ts"])) // 60)
+        result_line = (
+            "✅ <b>ЗАШЛО</b>\n"
+            f"📊 Было: {info['old_s1']}-{info['old_s2']} "
+            f"({info['minute']}')\n"
+            f"📊 Стало: {final_score}\n"
+            f"⏱ ~{elapsed} мин"
+        )
+        outcome = "hit"
+        label = "ЗАШЛО"
+    else:
+        result_line = (
+            "❌ <b>НЕ ЗАШЛО</b>\n"
+            f"📊 Итог: {final_score}\n"
+            "ℹ️ После сигнала новых голов не было."
+        )
+        outcome = "miss"
+        label = "НЕ ЗАШЛО"
+
+    # Сначала сохраняем исход в БД. Не удаляем ожидание, если запись не удалась.
+    saved = db.update_live_result(
+        str(key),
+        bool(won),
+        final_score=final_score,
+    )
+
+    if not saved:
+        print(
+            f"❌ Не удалось сохранить результат в БД: "
+            f"{info.get('match')} ({key})",
+            flush=True,
+        )
+        _schedule_retry(key, info, now)
+        return False
+
+    try:
+        edit_telegram(
+            info["message_id"],
+            format_with_result(info["base_text"], result_line),
+        )
+    except Exception as e:
+        # Результат уже зафиксирован в БД; повторно его не считаем.
+        print(
+            f"⚠️ Результат сохранён, но Telegram-сообщение не обновлено: {e}",
+            flush=True,
+        )
+
+    log_result_record({
+        "record_type": "result",
+        "game_id": str(key),
+        "timestamp": now,
+        "match": info.get("match"),
+        "strategy": info.get("strategy"),
+        "odd": info.get("odd"),
+        "outcome": outcome,
+        "final_score": final_score,
+    })
+
+    print(
+        f"{'✅' if won else '❌'} {label}: "
+        f"{info.get('match')} | итог {final_score}",
+        flush=True,
+    )
+    return True
 
 
 def check_pending_results(pending_checks):
-    """Проверяет голы после сигнала и сохраняет итог в базе."""
+    """Проверяет результат каждого сигнала, ожидающего завершения."""
     if not pending_checks:
         return
 
@@ -101,138 +220,138 @@ def check_pending_results(pending_checks):
     due_by_date = {}
 
     for key, info in list(pending_checks.items()):
-        if now >= int(info.get("check_after", 0)):
-            date_str = info.get("date_str") or datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
-            due_by_date.setdefault(date_str, []).append(key)
+        try:
+            check_after = int(info.get("check_after") or 0)
+        except (TypeError, ValueError):
+            check_after = 0
+
+        if now >= check_after:
+            date_str = info.get("date_str") or datetime.now(
+                MOSCOW_TZ
+            ).strftime("%Y-%m-%d")
+            due_by_date.setdefault(date_str, []).append(str(key))
 
     for date_str, keys in due_by_date.items():
-        events = fetch_ruscore_events(date_str)
+        print(
+            f"🔍 Проверка Ruscore: дата={date_str}, "
+            f"матчей={len(keys)}",
+            flush=True,
+        )
+
+        try:
+            events = fetch_ruscore_events(date_str)
+        except Exception as e:
+            print(f"❌ Ошибка запроса Ruscore: {e}", flush=True)
+            events = None
 
         if not events:
+            print(
+                f"⚠️ Ruscore не вернул события за {date_str}. "
+                "Повторим проверку позже.",
+                flush=True,
+            )
             for key in keys:
                 info = pending_checks.get(key)
-                if not info:
-                    continue
-                info["attempts"] = info.get("attempts", 0) + 1
-                info["check_after"] = now + CHECK_REPEAT_AFTER
-                persist_check(key, info)
-            print(f"⚠️ Источник результатов временно недоступен: {date_str}", flush=True)
+                if info:
+                    _schedule_retry(key, info, now)
             continue
+
+        print(f"📥 Ruscore вернул событий: {len(events)}", flush=True)
 
         for key in keys:
             info = pending_checks.get(key)
             if not info:
                 continue
 
+            match_name = info.get("match") or key
+
             try:
-                event = find_match(events, info["team1"], info["team2"])
+                event = find_match(
+                    events,
+                    info["team1"],
+                    info["team2"],
+                )
             except Exception as e:
-                print(f"⚠️ Ошибка поиска матча {info.get('match')}: {e}", flush=True)
+                print(f"❌ Ошибка поиска {match_name}: {e}", flush=True)
                 event = None
 
             if not event:
-                # Не ставим проигрыш и не удаляем проверку из памяти.
-                info["attempts"] = info.get("attempts", 0) + 1
-                delay = CHECK_REPEAT_AFTER
-                if info["attempts"] >= CHECK_MAX_ATTEMPTS:
-                    delay = max(CHECK_REPEAT_AFTER, 3600)
-                info["check_after"] = now + delay
-                persist_check(key, info)
                 print(
-                    f"🔎 Матч пока не найден: {info.get('match')}; "
-                    f"попытка {info['attempts']}. Продолжаем проверять.",
+                    f"🔎 Матч не найден: {match_name}; "
+                    f"команды: {info['team1']} / {info['team2']}",
                     flush=True,
                 )
+                _schedule_retry(key, info, now)
                 continue
 
             try:
                 score1, score2 = parse_score_for_match(
-                    event, info["team1"], info["team2"]
+                    event,
+                    info["team1"],
+                    info["team2"],
                 )
             except Exception as e:
-                print(f"⚠️ Ошибка разбора счёта {info.get('match')}: {e}", flush=True)
+                print(f"❌ Ошибка разбора счёта {match_name}: {e}", flush=True)
                 score1, score2 = None, None
 
-            if score1 is None or score2 is None:
-                info["attempts"] = info.get("attempts", 0) + 1
-                info["check_after"] = now + CHECK_REPEAT_AFTER
-                persist_check(key, info)
-                continue
-
-            score1, score2 = int(score1), int(score2)
             status_obj = event.get("status") or {}
-            status = status_obj.get("label", "") if isinstance(status_obj, dict) else str(status_obj)
-            finished = is_finished_status(status)
+            if isinstance(status_obj, dict):
+                status = status_obj.get("label", status_obj)
+            else:
+                status = status_obj
 
-            # Счёт должен увеличиться относительно счёта именно в момент сигнала.
-            goal_scored = (
-                score1 > int(info["old_s1"])
-                or score2 > int(info["old_s2"])
+            print(
+                f"📋 Матч: {match_name} | "
+                f"счёт={score1}-{score2} | статус={status!r}",
+                flush=True,
             )
 
-            final_score = f"{score1}-{score2}"
+            if score1 is None or score2 is None:
+                print(f"⚠️ Счёт пока не распознан: {match_name}", flush=True)
+                _schedule_retry(key, info, now)
+                continue
+
+            try:
+                score1, score2 = int(score1), int(score2)
+            except (TypeError, ValueError):
+                print(f"⚠️ Некорректный счёт матча {match_name}", flush=True)
+                _schedule_retry(key, info, now)
+                continue
+
+            old_s1 = int(info["old_s1"])
+            old_s2 = int(info["old_s2"])
+
+            # Если хотя бы одна команда забила после сигнала — прогноз успешен.
+            goal_scored = score1 > old_s1 or score2 > old_s2
+            finished = is_finished_status(status)
 
             if goal_scored:
-                elapsed = max(0, (now - int(info["signal_ts"])) // 60)
-                result_line = (
-                    "✅ <b>ЗАШЛО</b>\n"
-                    f"📊 Было: {info['old_s1']}-{info['old_s2']} "
-                    f"({info['minute']}')\n"
-                    f"📊 Стало: {final_score}\n"
-                    f"⏱ ~{elapsed} мин"
+                completed = _finish_signal(
+                    key, info, True, score1, score2, now
                 )
-                db.update_live_result(key, True, final_score=final_score)
-                edit_telegram(
-                    info["message_id"],
-                    format_with_result(info["base_text"], result_line),
-                )
-                log_result_record({
-                    "record_type": "result",
-                    "game_id": key,
-                    "timestamp": now,
-                    "match": info["match"],
-                    "strategy": info["strategy"],
-                    "odd": info.get("odd"),
-                    "outcome": "hit",
-                    "final_score": final_score,
-                })
-                print(f"✅ ЗАШЛО: {info['match']} [{info['strategy']}] {final_score}", flush=True)
-                pending_checks.pop(key, None)
+                if completed:
+                    pending_checks.pop(key, None)
                 continue
 
             if finished:
-                result_line = (
-                    "❌ <b>НЕ ЗАШЛО</b>\n"
-                    f"📊 Итог: {final_score}\n"
-                    "ℹ️ После сигнала новых голов не было."
+                completed = _finish_signal(
+                    key, info, False, score1, score2, now
                 )
-                db.update_live_result(key, False, final_score=final_score)
-                edit_telegram(
-                    info["message_id"],
-                    format_with_result(info["base_text"], result_line),
-                )
-                log_result_record({
-                    "record_type": "result",
-                    "game_id": key,
-                    "timestamp": now,
-                    "match": info["match"],
-                    "strategy": info["strategy"],
-                    "odd": info.get("odd"),
-                    "outcome": "miss",
-                    "final_score": final_score,
-                })
-                print(f"❌ НЕ ЗАШЛО: {info['match']} [{info['strategy']}] {final_score}", flush=True)
-                pending_checks.pop(key, None)
+                if completed:
+                    pending_checks.pop(key, None)
                 continue
 
-            info["attempts"] = info.get("attempts", 0) + 1
-            info["check_after"] = now + CHECK_REPEAT_AFTER
-            persist_check(key, info)
+            print(
+                f"⏳ Матч ещё не завершён: {match_name}; "
+                f"счёт {score1}-{score2}; статус={status!r}",
+                flush=True,
+            )
+            _schedule_retry(key, info, now)
 
 
 def format_signal_multi(p, strategies, odd):
     total = p["s1"] + p["s2"]
-    tb1, tb2 = total + 0.5, total + 1.5
+    tb1 = total + 0.5
     trend = p.get("trend", {})
 
     if trend.get("available"):
@@ -266,19 +385,23 @@ def format_signal_multi(p, strategies, odd):
     )
 
 
-def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_checks):
+def try_send_signal(
+    p, strategy, now_ts, p_game_cache, sent_signals, pending_checks
+):
     gid = p["game_id"]
     key = str(gid)
 
-    # Защита от повторного сигнала по уже записанному матчу.
     if db.is_live_signal_sent(key):
         return False
 
     game = p_game_cache.get(gid) or p_game_cache.get(key) or {}
-    odd = get_odd_total(game, p["s1"] + p["s2"])
 
+    odd = get_odd_total(game, p["s1"] + p["s2"])
     if odd is None:
-        print(f"⚠️ Нет коэффициента для {p['match']}; сигнал не отправлен", flush=True)
+        print(
+            f"⚠️ Нет коэффициента для {p['match']}; сигнал не отправлен",
+            flush=True,
+        )
         return False
 
     try:
@@ -289,11 +412,17 @@ def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_che
     if odd < strategy["min_odd"]:
         return False
 
-    # Один сигнал на матч; остальные стратегии не создают дубли.
     text = format_signal_multi(
-        p, [f"{strategy['emoji']} {strategy['strategy']}"], odd
+        p,
+        [f"{strategy['emoji']} {strategy['strategy']}"],
+        odd,
     )
-    msg_id = send_telegram(text)
+
+    try:
+        msg_id = send_telegram(text)
+    except Exception as e:
+        print(f"❌ Ошибка отправки Telegram: {e}", flush=True)
+        return False
 
     if not msg_id:
         print(f"⚠️ Telegram не подтвердил отправку: {p['match']}", flush=True)
@@ -323,10 +452,11 @@ def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_che
         "attempts": 0,
     }
 
+    # Сохраняем сигнал и данные для будущей проверки.
     saved = db.save_live_signal(signal_data)
     if not saved:
         print(
-            f"⚠️ Сигнал отправлен в Telegram, но запись в БД не подтверждена: "
+            f"⚠️ Не подтверждено сохранение сигнала в БД: "
             f"{p['match']} ({key})",
             flush=True,
         )
@@ -356,9 +486,7 @@ def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_che
         "attempts": 0,
     }
 
-    # Сохраняем состояние повторно на случай, если запись создалась,
-    # но часть метаданных в ней отсутствовала.
-    db.update_live_signal_check(key, signal_data)
+    persist_check(key, pending_checks[key])
 
     log_result_record({
         "record_type": "signal",
@@ -371,5 +499,10 @@ def try_send_signal(p, strategy, now_ts, p_game_cache, sent_signals, pending_che
         "score_at_signal": p["score"],
     })
 
-    print(f"📤 СИГНАЛ: {p['match']} | {strategy['strategy']} | кэф {odd:.2f}", flush=True)
+    print(
+        f"📤 СИГНАЛ: {p['match']} | {strategy['strategy']} | "
+        f"кэф {odd:.2f}; первая проверка через "
+        f"{CHECK_FIRST_AFTER} сек.",
+        flush=True,
+    )
     return True
