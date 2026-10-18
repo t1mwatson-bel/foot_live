@@ -379,15 +379,17 @@ def _schedule_retry(key, info, now, delay=None):
 # ФИКСАЦИЯ РЕЗУЛЬТАТА
 # ============================================================
 
+
 def _finish_signal(key, info, won, score1, score2, now):
+    """Сохраняет итог в БД, обновляет Telegram и записывает результат в журнал."""
     final_score = f"{score1}-{score2}"
 
     if won:
-        elapsed = max(0, (now - int(info["signal_ts"])) // 60)
+        elapsed = max(0, (now - int(info.get("signal_ts") or now)) // 60)
         result_line = (
             "✅ <b>ЗАШЛО</b>\n"
-            f"📊 Было: {info['old_s1']}-{info['old_s2']} "
-            f"({info['minute']}')\n"
+            f"📊 Было: {info.get('old_s1', 0)}-{info.get('old_s2', 0)} "
+            f"({info.get('minute', 0)}')\n"
             f"📊 Стало: {final_score}\n"
             f"⏱ ~{elapsed} мин"
         )
@@ -402,6 +404,7 @@ def _finish_signal(key, info, won, score1, score2, now):
         outcome = "miss"
         label = "НЕ ЗАШЛО"
 
+    # 1. Сначала сохраняем итог в SQLite.
     try:
         saved = db.update_live_result(
             str(key),
@@ -421,26 +424,27 @@ def _finish_signal(key, info, won, score1, score2, now):
         _schedule_retry(key, info, now)
         return False
 
-    
-if info.get("message_id") and info.get("base_text"):
-    try:
-        edit_telegram(
-            info["message_id"],
-            format_with_result(info["base_text"], result_line),
-        )
-    except Exception as e:
+    # 2. Обновляем исходное сообщение в Telegram, если его данные доступны.
+    if info.get("message_id") and info.get("base_text"):
+        try:
+            edit_telegram(
+                info["message_id"],
+                format_with_result(info["base_text"], result_line),
+            )
+        except Exception as e:
+            print(
+                f"⚠️ Результат сохранён в базе, "
+                f"но Telegram-сообщение не обновлено: {e}",
+                flush=True,
+            )
+    else:
         print(
-            f"⚠️ Результат сохранён в базе, "
-            f"но Telegram-сообщение не обновлено: {e}",
+            f"ℹ️ Сигнал {key}: результат сохранён в базе; "
+            "Telegram-сообщение не обновлено — нет ID или исходного текста.",
             flush=True,
         )
-else:
-    print(
-        f"ℹ️ Сигнал {key}: результат сохранён в базе; "
-        "старое Telegram-сообщение нельзя обновить — нет его ID или текста",
-        flush=True,
-    )
 
+    # 3. Записываем результат в JSONL независимо от обновления Telegram.
     log_result_record({
         "record_type": "result",
         "game_id": str(key),
@@ -457,7 +461,8 @@ else:
         f"{info.get('match')} | итог {final_score}",
         flush=True,
     )
-        return True
+
+    return True
 
 
 # ============================================================
