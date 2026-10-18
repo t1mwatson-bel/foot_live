@@ -19,11 +19,6 @@ from stats_parser import (
     strategy_attacks,
     strategy_combo,
 )
-from live_logic import (
-    check_pending_results,
-    try_send_signal,
-    restore_pending_checks,
-)
 from ruscore import get_today_schedule, get_windows
 
 
