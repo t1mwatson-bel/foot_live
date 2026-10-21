@@ -1,4 +1,3 @@
-
 import json
 import math
 import os
@@ -28,25 +27,29 @@ MODEL_FILE = os.getenv(
     str(DATA_DIR / "football_model.json"),
 )
 
-# Основная база сигналов. Учитываем фактический путь /app/data.
+# Путь по умолчанию должен совпадать с database.py: DATA_DIR/bot_stats.db.
+# Иначе ML может читать другую БД и не видеть результаты сигналов.
 def find_bot_db():
     configured = os.getenv("FOOTBALL_BOT_DB")
+    primary = str(Path(configured).expanduser()) if configured else str(DATA_DIR / "bot_stats.db")
 
+    if os.path.isfile(primary):
+        return primary
+
+    # Запасные варианты используются только если основной файл отсутствует.
     candidates = [
-        configured,
-        "/app/data/bot_stats.db",
-        "/app/bot_stats.db",
-        str(DATA_DIR / "data" / "bot_stats.db"),
         str(DATA_DIR / "bot_stats.db"),
+        str(DATA_DIR / "data" / "bot_stats.db"),
+        "/app/bot_stats.db",
+        "/app/data/bot_stats.db",
         "bot_stats.db",
     ]
-
     for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
+        if os.path.isfile(candidate):
             return candidate
 
-    # Не создаём случайную новую базу вместо отсутствующей.
-    return configured or "/app/data/bot_stats.db"
+    # Не создаём молча новую базу сигналов.
+    return primary
 
 
 BOT_DB = find_bot_db()
@@ -239,59 +242,59 @@ def extract_features(match, strategy, odds=None):
 
     home_score = number(first_value(
         match, "home_score", "score_home", "home_goals",
-        "score1", "team1_score",
+        "score1", "team1_score", "s1", "old_s1",
     ))
     away_score = number(first_value(
         match, "away_score", "score_away", "away_goals",
-        "score2", "team2_score",
+        "score2", "team2_score", "s2", "old_s2",
     ))
 
     home_xg = number(first_value(
         match, "home_xg", "xg_home", "xG_home",
-        "home_expected_goals",
+        "home_expected_goals", "xg1",
     ))
     away_xg = number(first_value(
         match, "away_xg", "xg_away", "xG_away",
-        "away_expected_goals",
+        "away_expected_goals", "xg2",
     ))
 
     home_shots_on = number(first_value(
         match, "home_shots_on", "shots_on_home",
-        "home_shots_on_target", "shotsOnTarget1",
+        "home_shots_on_target", "shotsOnTarget1", "shots_on1",
     ))
     away_shots_on = number(first_value(
         match, "away_shots_on", "shots_on_away",
-        "away_shots_on_target", "shotsOnTarget2",
+        "away_shots_on_target", "shotsOnTarget2", "shots_on2",
     ))
 
     home_shots = number(first_value(
-        match, "home_shots", "shots_home", "total_shots_home",
+        match, "home_shots", "shots_home", "total_shots_home", "shots_all1",
     ))
     away_shots = number(first_value(
-        match, "away_shots", "shots_away", "total_shots_away",
+        match, "away_shots", "shots_away", "total_shots_away", "shots_all2",
     ))
 
     home_attacks = number(first_value(
         match, "home_attacks", "attacks_home",
-        "dangerous_attacks_home", "home_dangerous_attacks",
+        "dangerous_attacks_home", "home_dangerous_attacks", "att1",
     ))
     away_attacks = number(first_value(
         match, "away_attacks", "attacks_away",
-        "dangerous_attacks_away", "away_dangerous_attacks",
+        "dangerous_attacks_away", "away_dangerous_attacks", "att2",
     ))
 
     home_corners = number(first_value(
-        match, "home_corners", "corners_home",
+        match, "home_corners", "corners_home", "corners1",
     ))
     away_corners = number(first_value(
-        match, "away_corners", "corners_away",
+        match, "away_corners", "corners_away", "corners2",
     ))
 
     home_red = number(first_value(
-        match, "home_red", "red_home", "home_red_cards",
+        match, "home_red", "red_home", "home_red_cards", "red1",
     ))
     away_red = number(first_value(
-        match, "away_red", "red_away", "away_red_cards",
+        match, "away_red", "red_away", "away_red_cards", "red2",
     ))
 
     minute = number(first_value(
@@ -301,17 +304,26 @@ def extract_features(match, strategy, odds=None):
     trend = match.get("trend") or match.get("momentum") or {}
     if not isinstance(trend, dict):
         trend = {}
+    # Поддержка полей динамики, если парсер передал их на верхнем уровне.
+    trend = dict(trend)
+    for source_key, target_key in (("xg_delta", "xg_delta"),
+                                   ("shots_on_delta", "shots_on_delta"),
+                                   ("shots_delta", "shots_delta"),
+                                   ("corners_delta", "corners"),
+                                   ("attacks_delta", "attacks")):
+        if target_key not in trend and match.get(source_key) is not None:
+            trend[target_key] = match[source_key]
 
-    trend_available = bool(trend)
+    trend_available = bool(trend.get("available", bool(trend)))
 
     trend_xg = number(first_value(
         trend, "xg", "trend_xg", "xg_delta",
     ))
     trend_shots_on = number(first_value(
-        trend, "shots_on", "shots_on_target", "trend_shots_on",
+        trend, "shots_on", "shots_on_target", "trend_shots_on", "shots_on_delta",
     ))
     trend_shots = number(first_value(
-        trend, "shots", "total_shots", "trend_shots",
+        trend, "shots", "total_shots", "trend_shots", "shots_delta",
     ))
     trend_corners = number(first_value(
         trend, "corners", "trend_corners",
@@ -323,7 +335,7 @@ def extract_features(match, strategy, odds=None):
     # Поддерживаем названия стратегий, использовавшиеся в OLD.
     strategy_xg = int("xg-мощь" in strategy_name or "xg" in strategy_name)
     strategy_shots = int("удары" in strategy_name or "shots" in strategy_name)
-    strategy_corners = int("углы" in strategy_name or "corners" in strategy_name)
+    strategy_corners = int("углы" in strategy_name or "углов" in strategy_name or "corners" in strategy_name)
     strategy_attacks = int(
         "опасные атаки" in strategy_name or "атаки" in strategy_name
     )
@@ -533,6 +545,21 @@ def sync_confirmed_results():
             changed += max(cursor.rowcount, 0)
 
         target.commit()
+
+        if changed:
+            result = train()
+            if result.get("trained"):
+                print(
+                    f"🧠 OLD ML: модель обучена на {result['samples']} подтверждённых сигналах",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"🧠 OLD ML: обучение пока не выполнено — {result.get('reason', 'недостаточно данных')} "
+                    f"({result.get('samples', 0)}/{MIN_TRAINING_SAMPLES})",
+                    flush=True,
+                )
+
         return changed
 
     except Exception as e:
@@ -675,7 +702,11 @@ def train():
                 "reason": "мало подтверждённых примеров",
             }
 
-        weights, bias, previous_samples = load_state(con)
+        _, _, previous_samples = load_state(con)
+        # Каждый запуск заново обучает модель на полной размеченной выборке,
+        # чтобы повторные синхронизации не переобучали её на старых примерах.
+        weights = [0.0] * len(FEATURE_NAMES)
+        bias = 0.0
 
         # Несколько проходов по сохранённым подтверждённым исходам.
         for _ in range(EPOCHS):
