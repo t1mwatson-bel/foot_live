@@ -191,36 +191,51 @@ def save_live_signal(data):
         return True
 
 
-def update_live_signal_check(game_id, data):
-    """Обновляет параметры проверки только у ожидающего сигнала."""
-    allowed = {
-        "team1", "team2", "old_s1", "old_s2", "date_str",
-        "signal_ts", "message_id", "base_text", "check_after",
-        "attempts", "final_score",
-    }
-
-    updates = {
-        key: value
-        for key, value in data.items()
-        if key in allowed
-    }
-
-    if not updates:
-        return False
-
-    assignments = ", ".join(f"{key} = ?" for key in updates)
-    values = list(updates.values())
-    values.append(str(game_id))
+def update_live_result(game_id, is_goal_scored, final_score=None):
+    """Фиксирует результат сигнала, не перезаписывая закрытый результат."""
+    status = "WIN" if is_goal_scored else "LOSE"
+    now = int(time.time())
 
     with get_connection() as conn:
-        cur = conn.execute(
-            f"""
+        row = conn.execute("""
+            SELECT status, odds
+            FROM live_signals
+            WHERE game_id = ?
+        """, (str(game_id),)).fetchone()
+
+        if row is None:
+            print(
+                f"❌ Не найден сигнал для записи результата: {game_id}",
+                flush=True,
+            )
+            return False
+
+        if row["status"] != "PENDING":
+            return row["status"] in ("WIN", "LOSE")
+
+        # Считаем чистую прибыль правильно
+        odds = float(row["odds"] or 1.0)
+        if is_goal_scored:
+            profit = max(0.0, odds - 1.0)
+        else:
+            profit = -1.0
+
+        cur = conn.execute("""
             UPDATE live_signals
-            SET {assignments}
-            WHERE game_id = ? AND status = 'PENDING'
-            """,
-            values,
-        )
+            SET status = ?,
+                profit = ?,
+                final_score = ?,
+                result_updated_at = ?
+            WHERE game_id = ?
+              AND status = 'PENDING'
+        """, (
+            status,
+            profit,
+            final_score,
+            now,
+            str(game_id),
+        ))
+
         return cur.rowcount > 0
 
 
