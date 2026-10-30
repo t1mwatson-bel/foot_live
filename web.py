@@ -1,4 +1,3 @@
-
 import json
 from datetime import datetime
 from flask import Flask, render_template_string
@@ -234,7 +233,20 @@ def index():
     pending = sum(1 for row in signals if row.get("status") == "PENDING")
     settled = wins + loses
 
-    profit = sum(float(row.get("profit") or 0) for row in signals)
+    # === ИСПРАВЛЕНИЕ: Пересчитываем прибыль на лету по коэффициентам ===
+    total_profit = 0.0
+    for row in signals:
+        if row.get("status") == "WIN":
+            odds = float(row.get("odds") or 1.0)
+            row["profit"] = max(0.0, odds - 1.0)
+            total_profit += row["profit"]
+        elif row.get("status") == "LOSE":
+            row["profit"] = -1.0
+            total_profit -= 1.0
+        else:
+            row["profit"] = 0.0
+
+    profit = total_profit
     accuracy = round(wins / settled * 100, 2) if settled else 0.0
     roi = round(profit / settled * 100, 2) if settled else 0.0
 
@@ -267,6 +279,7 @@ def index():
         except (TypeError, ValueError, OSError):
             label = "—"
 
+        # Здесь row["profit"] уже пересчитан правильно в цикле выше
         cumulative += float(row.get("profit") or 0)
         chart_labels.append(label)
         chart_data.append(round(cumulative, 2))
