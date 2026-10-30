@@ -1,4 +1,3 @@
-
 import time
 import threading
 import traceback
@@ -7,6 +6,7 @@ from datetime import datetime
 import requests
 import web
 import database as db
+import goal_model as ml  # <--- Добавлен импорт модели для синхронизации
 
 from config import *
 from stats_parser import (
@@ -266,6 +266,16 @@ def check_results_safely():
 
 def bot_loop():
     print("🚀 LIVE-БОТ OLD ЗАПУЩЕН", flush=True)
+    
+    # ============================================================
+    # ПРИНУДИТЕЛЬНАЯ СИНХРОНИЗАЦИЯ ML ПРИ СТАРТЕ
+    # ============================================================
+    print("⏳ Запуск синхронизации OLD ML...", flush=True)
+    try:
+        ml.sync_confirmed_results()
+    except Exception as e:
+        print(f"⚠️ Ошибка при старте синхронизации OLD ML: {e}", flush=True)
+    # ============================================================
 
     while True:
         try:
