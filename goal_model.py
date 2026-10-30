@@ -455,83 +455,49 @@ def observe(match, strategy, odds=None):
 
 def sync_confirmed_results():
     """
-    Переносит подтверждённые WIN/LOSE из основной базы.
-    Схема основной таблицы проверяется перед чтением.
+    Читает результаты из football_results.jsonl и обновляет базу модели.
     Возвращает количество новых размеченных примеров.
     """
-    if not os.path.isfile(BOT_DB):
+    import os
+    import json
+    
+    # Ищем файл результатов в корне проекта
+    results_file = "football_results.jsonl"
+    
+    if not os.path.isfile(results_file):
+        print(f"⚠️ OLD ML: файл {results_file} не найден", flush=True)
         return 0
 
-    source = None
     target = None
     changed = 0
+    processed_results = {}
 
     try:
-        source = sqlite3.connect(BOT_DB, timeout=15)
-        source.row_factory = sqlite3.Row
+        # 1. Читаем JSONL и собираем результаты
+        with open(results_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    if data.get("record_type") == "result":
+                        gid = str(data.get("game_id", "")).strip()
+                        outcome_str = str(data.get("outcome", "")).strip().lower()
+                        
+                        if gid and outcome_str in ("hit", "miss"):
+                            # Если результат уже был, берем последний
+                            processed_results[gid] = 1 if outcome_str == "hit" else 0
+                except json.JSONDecodeError:
+                    continue
 
-        table = source.execute("""
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name = 'live_signals'
-        """).fetchone()
-
-        if not table:
-            print(
-                "⚠️ OLD ML: в основной базе нет таблицы live_signals",
-                flush=True,
-            )
+        if not processed_results:
             return 0
 
-        columns = {
-            row["name"]
-            for row in source.execute(
-                "PRAGMA table_info(live_signals)"
-            ).fetchall()
-        }
-
-        game_col = next(
-            (c for c in ("game_id", "match_id", "event_id") if c in columns),
-            None,
-        )
-        status_col = next(
-            (c for c in ("status", "result", "outcome") if c in columns),
-            None,
-        )
-
-        if not game_col or not status_col:
-            print(
-                "⚠️ OLD ML: не найдены поля ID матча или результата "
-                "в live_signals",
-                flush=True,
-            )
-            return 0
-
-        # Имена колонок берутся только из списка реальных полей таблицы.
-        rows = source.execute(
-            f'SELECT "{game_col}" AS game_id, '
-            f'"{status_col}" AS status '
-            f'FROM live_signals '
-            f'WHERE UPPER("{status_col}") IN (?, ?)',
-            ("WIN", "LOSE"),
-        ).fetchall()
-
+        # 2. Подключаемся к базе модели
         target = connect_model_db()
 
-        for row in rows:
-            game_id = row["game_id"]
-            status = str(row["status"] or "").strip().upper()
-
-            if game_id is None:
-                continue
-
-            if status == "WIN":
-                outcome = 1
-            elif status == "LOSE":
-                outcome = 0
-            else:
-                continue
-
+        # 3. Обновляем исходы в ml_samples
+        for gid, outcome in processed_results.items():
             cursor = target.execute("""
                 UPDATE ml_samples
                 SET outcome = ?, labeled_ts = ?
@@ -539,13 +505,14 @@ def sync_confirmed_results():
             """, (
                 outcome,
                 int(time.time()),
-                str(game_id),
+                gid,
             ))
-
+            
             changed += max(cursor.rowcount, 0)
 
         target.commit()
 
+        # 4. Если что-то обновили — запускаем обучение
         if changed:
             result = train()
             if result.get("trained"):
@@ -564,14 +531,12 @@ def sync_confirmed_results():
 
     except Exception as e:
         print(
-            f"⚠️ OLD ML: ошибка синхронизации результатов: {e}",
+            f"⚠️ OLD ML: ошибка синхронизации результатов из JSONL: {e}",
             flush=True,
         )
         return 0
 
     finally:
-        if source:
-            source.close()
         if target:
             target.close()
 
