@@ -1,4 +1,5 @@
 import time
+from parse_nb_bet_html import parse_nb_bet_html
 import threading
 import traceback
 from datetime import datetime
