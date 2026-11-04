@@ -266,73 +266,89 @@ def check_results_safely():
 
 
 def bot_loop():
-    print("🚀 LIVE-БОТ OLD ЗАПУЩЕН", flush=True)
-    
-    # ============================================================
-    # ПРИНУДИТЕЛЬНАЯ СИНХРОНИЗАЦИЯ ML ПРИ СТАРТЕ
-    # ============================================================
-    print("⏳ Запуск синхронизации OLD ML...", flush=True)
-    try:
-        ml.sync_confirmed_results()
-    except Exception as e:
-        print(f"⚠️ Ошибка при старте синхронизации OLD ML: {e}", flush=True)
-    # ============================================================
-
+    print("🚀 PREMATCH-БОТ ЗАПУЩЕН (умная модель на nb-bet)", flush=True)
     while True:
         try:
             now = datetime.now(MOSCOW_TZ)
-            now_str = now.strftime("%H:%M")
+            print(f"\n🔄 [{now:%H:%M:%S}] Загрузка линии...", flush=True)
 
-            # 1. Проверяем исходы ожидающих сигналов.
-            check_results_safely()
+            games = get_prematch_games()
+            count_ok = 0
+            count_value = 0
 
-            # 2. Повторяем обновление сообщений Telegram,
-            # даже если результат уже сохранён на сайте.
-            retry_telegram_results()
+            for game in games:
+                parsed = parse_prematch_game(game)
+                if not parsed:
+                    continue
 
-            # 3. Ночной режим не блокирует проверку результатов
-            # и повторное обновление Telegram.
-            if SLEEP_HOUR_START <= now.hour < SLEEP_HOUR_END:
-                print(
-                    f"😴 Ночной режим ({now_str}); "
-                    f"проверка результатов продолжается",
-                    flush=True,
-                )
-                time.sleep(60)
-                continue
+                # Фильтр: специальные/сборные
+                t1 = parsed["team1"].lower()
+                t2 = parsed["team2"].lower()
+                if ("специальное" in t1 or "специальное" in t2
+                        or t1 in ("хозяева", "гости") or t2 in ("хозяева", "гости")):
+                    continue
 
-            # 4. Обновляем расписание и анализируем матчи.
-            refresh_schedule_if_needed()
+                # Фильтр: тотал 2.5
+                tb_25 = parsed["odds"]["TB"].get(2.5)
+                if not tb_25 or not tb_25.get("over"):
+                    continue
 
-            if is_match_time():
-                monitor()
+                count_ok += 1
 
-            # 5. После анализа матчей проверяем результаты ещё раз.
-            check_results_safely()
+                # Пытаемся достать данные с nb-bet
+                nb_data = None
+                if "Славия" in parsed["team1"] and "Арсенал" in parsed["team2"]:
+                    try:
+                        nb_data = parse_nb_bet_html("match_page.html")
+                    except Exception as e:
+                        print(f"⚠️ Ошибка парсинга nb-bet: {e}", flush=True)
 
-            # 6. Повторно пробуем отредактировать сообщения,
-            # которые не удалось обновить с первой попытки.
-            retry_telegram_results()
+                if nb_data and nb_data["avg_scored_home"] is not None:
+                    # УМНАЯ модель — используем средние голы команд
+                    lam_home = (nb_data["avg_scored_home"] + nb_data["avg_conceded_away"]) / 2
+                    lam_away = (nb_data["avg_scored_away"] + nb_data["avg_conceded_home"]) / 2
+                    lam_total = lam_home + lam_away
 
-            time.sleep(UPDATE_INTERVAL)
+                    p_model = prob_over(2.5, lam_total)
+                    coef_over = tb_25["over"]
+                    p_book = 1 / coef_over
+                    edge = p_model - p_book
+
+                    print(
+                        f"\n⚽ {parsed['team1']} — {parsed['team2']} (данные с nb-bet)"
+                        f"\n   Лига: {parsed['liga']}"
+                        f"\n   Начало: {parsed['start_time']:%d.%m %H:%M}"
+                        f"\n   Кэф ТБ 2.5: {coef_over}"
+                        f"\n   Средние голы: {parsed['team1']} — забивает {nb_data['avg_scored_home']}, пропускает {nb_data['avg_conceded_home']}"
+                        f"\n                 {parsed['team2']} — забивает {nb_data['avg_scored_away']}, пропускает {nb_data['avg_conceded_away']}"
+                        f"\n   Ожидаемые голы (lam): {lam_home:.2f} + {lam_away:.2f} = {lam_total:.2f}"
+                        f"\n   Модель: {p_model:.1%} | Букмекер: {p_book:.1%} | Edge: {edge:+.1%}",
+                        flush=True
+                    )
+                    if edge > 0.05:
+                        count_value += 1
+                        print(f"   🔥 ВАЛУЙ", flush=True)
+                else:
+                    # Матч без данных с nb-bet — пропускаем (не считаем)
+                    print(
+                        f"ℹ️ {parsed['team1']} — {parsed['team2']}: нет данных с nb-bet",
+                        flush=True
+                    )
+
+            print(
+                f"\n✅ Матчей с ТБ 2.5: {count_ok} | валуев: {count_value}",
+                flush=True
+            )
+            print("💤 Спим 5 минут...", flush=True)
+            time.sleep(300)
 
         except KeyboardInterrupt:
-            print("⏹️ Остановка по команде", flush=True)
+            print("⏹️ Остановка", flush=True)
             break
-
         except Exception as e:
-            print(
-                f"❌ Ошибка основного цикла: {e}",
-                flush=True,
-            )
+            print(f"❌ Ошибка цикла: {e}", flush=True)
             traceback.print_exc()
-
-            # При ошибке цикла всё равно стараемся обработать
-            # результаты и обновить сообщения Telegram.
-            check_results_safely()
-            retry_telegram_results()
-
-            time.sleep(30)
+            time.sleep(60)
 
 
 if __name__ == "__main__":
