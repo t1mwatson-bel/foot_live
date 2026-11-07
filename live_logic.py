@@ -1293,7 +1293,26 @@ def try_send_signal(
     except (TypeError, ValueError):
         return False
 
-    if odd < strategy["min_odd"]:
+        if int(p.get("minute") or 0) > 80:
+        return False
+
+    game = p_game_cache.get(gid) or p_game_cache.get(key) or {}
+
+    odd = get_odd_total(game, p["s1"] + p["s2"])
+
+    if odd is None:
+        print(
+            f"⚠️ Нет коэффициента для {p['match']}; сигнал не отправлен",
+            flush=True,
+        )
+        return False
+
+    try:
+        odd = float(odd)
+    except (TypeError, ValueError):
+        return False
+
+    if odd < max(strategy["min_odd"], 1.7):
         return False
 
     text = format_signal_multi(
