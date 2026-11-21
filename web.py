@@ -137,6 +137,35 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding-top: 
     </div>
   </section>
 
+  <!-- НОВЫЙ БЛОК: СТАТИСТИКА ПО ТИПАМ СТАВОК -->
+  <section class="panel">
+    <h2>🎯 По типам ставок</h2>
+    <div class="table-wrap">
+      <table style="min-width: 100%;">
+        <thead>
+          <tr>
+            <th>Тип</th>
+            <th style="text-align: center;">Ставок</th>
+            <th style="text-align: center;">Зашло</th>
+            <th style="text-align: right;">Winrate</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for s in strategy_stats %}
+          <tr>
+            <td class="match" style="font-weight: normal;">{{ s.name }}</td>
+            <td style="text-align: center;">{{ s.total }}</td>
+            <td style="text-align: center;">{{ s.wins }}</td>
+            <td style="text-align: right; font-weight: 800; color: var(--green);">{{ s.winrate }}%</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="empty">Пока нет завершенных прогнозов</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="panel">
     <h2>Накопленная прибыль</h2>
     <div class="chart-wrap"><canvas id="profitChart"></canvas></div>
@@ -233,6 +262,35 @@ def index():
     pending = sum(1 for row in signals if row.get("status") == "PENDING")
     settled = wins + loses
 
+    # === ПОДСЧЕТ СТАТИСТИКИ ПО АЛГОРИТМАМ (СТРАТЕГИЯМ) ===
+    strategy_stats_dict = {}
+    for row in signals:
+        strat = row.get("strategy") or "Без названия"
+        if strat not in strategy_stats_dict:
+            strategy_stats_dict[strat] = {"total": 0, "wins": 0}
+        
+        status = row.get("status")
+        if status in ("WIN", "LOSE"):
+            strategy_stats_dict[strat]["total"] += 1
+            if status == "WIN":
+                strategy_stats_dict[strat]["wins"] += 1
+
+    # Формируем список для отправки в HTML
+    strategy_stats = []
+    for name, data in strategy_stats_dict.items():
+        total = data["total"]
+        wins_algo = data["wins"]
+        winrate = round(wins_algo / total * 100, 1) if total > 0 else 0.0
+        strategy_stats.append({
+            "name": name,
+            "total": total,
+            "wins": wins_algo,
+            "winrate": winrate
+        })
+
+    # Сортируем по убыванию количества ставок
+    strategy_stats.sort(key=lambda x: x["total"], reverse=True)
+
     # === ИСПРАВЛЕНИЕ: Пересчитываем прибыль на лету по коэффициентам ===
     total_profit = 0.0
     for row in signals:
@@ -287,6 +345,7 @@ def index():
     return render_template_string(
         HTML_TEMPLATE,
         signals=signals,
+        strategy_stats=strategy_stats, # <--- Передаем новую статистику в шаблон
         total=len(signals),
         wins=wins,
         loses=loses,
