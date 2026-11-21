@@ -191,36 +191,75 @@ def save_live_signal(data):
         return True
 
 
+def update_live_signal_check(game_id, data):
+    """Сохраняет состояние проверки, не меняя исход сигнала."""
+    allowed = {
+        "team1",
+        "team2",
+        "old_s1",
+        "old_s2",
+        "date_str",
+        "signal_ts",
+        "message_id",
+        "base_text",
+        "check_after",
+        "attempts",
+    }
+
+    fields = {
+        key: value
+        for key, value in data.items()
+        if key in allowed
+    }
+
+    if not fields:
+        return False
+
+    assignments = ", ".join(
+        f"{key} = ?" for key in fields
+    )
+
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"UPDATE live_signals SET {assignments} "
+            "WHERE game_id = ? AND status = 'PENDING'",
+            (*fields.values(), str(game_id)),
+        )
+
+        return cur.rowcount > 0
+
+
 def update_live_result(game_id, is_goal_scored, final_score=None):
-    """Фиксирует результат сигнала, не перезаписывая закрытый результат."""
+    """Фиксирует исход и прибыль на единицу ставки."""
     status = "WIN" if is_goal_scored else "LOSE"
     now = int(time.time())
 
     with get_connection() as conn:
-        row = conn.execute("""
-            SELECT status, odds
-            FROM live_signals
-            WHERE game_id = ?
-        """, (str(game_id),)).fetchone()
+        row = conn.execute(
+            "SELECT status, odds "
+            "FROM live_signals WHERE game_id = ?",
+            (str(game_id),),
+        ).fetchone()
 
         if row is None:
             print(
-                f"❌ Не найден сигнал для записи результата: {game_id}",
+                f"Не найден сигнал для записи результата: {game_id}",
                 flush=True,
             )
             return False
 
         if row["status"] != "PENDING":
-            return row["status"] in ("WIN", "LOSE")
+            return row["status"] == status
 
-        # Считаем чистую прибыль правильно
         odds = float(row["odds"] or 1.0)
+
         if is_goal_scored:
             profit = max(0.0, odds - 1.0)
         else:
             profit = -1.0
 
-        cur = conn.execute("""
+        cur = conn.execute(
+            """
             UPDATE live_signals
             SET status = ?,
                 profit = ?,
@@ -228,15 +267,18 @@ def update_live_result(game_id, is_goal_scored, final_score=None):
                 result_updated_at = ?
             WHERE game_id = ?
               AND status = 'PENDING'
-        """, (
-            status,
-            profit,
-            final_score,
-            now,
-            str(game_id),
-        ))
+            """,
+            (
+                status,
+                profit,
+                final_score,
+                now,
+                str(game_id),
+            ),
+        )
 
         return cur.rowcount > 0
+
 
 
 def is_live_signal_sent(game_id):
