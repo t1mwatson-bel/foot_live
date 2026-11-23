@@ -21,11 +21,9 @@ def normalize_name(name):
     """Приводит название команды к единому виду."""
     if not name:
         return ""
-    # Приводим к нижнему регистру, убираем пробелы, дефисы, точки и т.д.
     n = (name.lower().replace(" ", "").replace("-", "").replace("'", "")
          .replace("ё", "е").replace(".", "").strip())
     
-    # Проверяем словарь синонимов
     for alias, standard in TEAM_ALIASES.items():
         if n.startswith(alias.replace(" ", "")):
             return standard
@@ -73,6 +71,7 @@ def fetch_ruscore_events(date_str):
                 status = (ev.get("status") or {}).get("label", "")
                 
                 events.append({
+                    "id": ev.get("id"),  # <--- ДОБАВЛЕНО: ID матча в Ruscore
                     "home": {"name": home},
                     "away": {"name": away},
                     "status": {"label": status},
@@ -90,7 +89,6 @@ def find_match(events, team1, team2):
     n1 = normalize_name(team1)
     n2 = normalize_name(team2)
     
-    # Берем первые 5 букв для поиска, чтобы "Брайтон" нашелся в "Брайтон энд Хав Альбион"
     t1 = n1[:5]
     t2 = n2[:5]
 
@@ -98,7 +96,6 @@ def find_match(events, team1, team2):
         home_name = normalize_name((ev.get("home") or {}).get("name", ""))
         away_name = normalize_name((ev.get("away") or {}).get("name", ""))
         
-        # Проверяем совпадение по началу названий
         h_match = (t1 in home_name) or (t2 in home_name)
         a_match = (t1 in away_name) or (t2 in away_name)
         
@@ -106,6 +103,51 @@ def find_match(events, team1, team2):
             return ev
             
     return None
+
+def fetch_ruscore_lineups(event_id):
+    """Получает составы, травмы, тренеров, схему по ID матча."""
+    if not event_id:
+        return None
+
+    url = f"https://api-statistics.ruscore.ru/v1/events/{event_id}/lineups"
+    params = {
+        "app_id": "ruscore",
+        "api_key": RUSCORE_PARAMS.get("api_key", ""),
+        "lang": "ru",
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=RUSCORE_HEADERS, timeout=15)
+        if r.status_code != 200:
+            print(f"⚠️ Ruscore lineups HTTP {r.status_code}", flush=True)
+            return None
+
+        data = r.json()
+        payload = data.get("data") or {}
+
+        return {
+            "lineups": payload.get("lineups") or {},
+            "injuries": payload.get("injuries") or {},
+            "coaches": payload.get("coaches") or {},
+            "formation": payload.get("formation") or {},
+        }
+
+    except Exception as e:
+        print(f"⚠️ Ошибка lineups Ruscore: {e}", flush=True)
+        return None
+
+def enrich_with_ruscore(parsed, ruscore_data):
+    """Добавляет травмы/составы/тренеров в parsed."""
+    if not ruscore_data or not parsed:
+        return parsed
+
+    parsed["ruscore"] = {
+        "injuries": ruscore_data.get("injuries") or {},
+        "lineups": ruscore_data.get("lineups") or {},
+        "coaches": ruscore_data.get("coaches") or {},
+        "formation": ruscore_data.get("formation") or {},
+    }
+    return parsed
 
 def parse_score_from_ruscore(ev):
     for s in (ev.get("score") or []):
@@ -126,11 +168,9 @@ def parse_score_for_match(ev, team1, team2):
     n1 = normalize_name(team1)
     n2 = normalize_name(team2)
     
-    # Если хозяева в Ruscore совпадают с хозяевами в сигнале
     if (n1[:5] in home) and (n2[:5] in away): 
         return h_score, a_score
         
-    # Если команды поменялись местами
     if (n1[:5] in away) and (n2[:5] in home): 
         return a_score, h_score
         
