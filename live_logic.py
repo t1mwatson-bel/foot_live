@@ -1227,6 +1227,31 @@ def check_pending_results(pending_checks):
 # ФОРМАТ СИГНАЛА
 # ============================================================
 
+def build_ruscore_context(p):
+    """Формирует строку с травмами и составами для сигнала."""
+    ruscore = p.get("ruscore")
+    if not ruscore:
+        return ""
+    
+    lines = []
+    injuries = ruscore.get("injuries", {})
+    
+    # Проверяем травмы хозяев
+    home_inj = injuries.get("home", [])
+    if home_inj:
+        names = [inj.get("name", "") for inj in home_inj[:3]]
+        lines.append(f"🏥 Травмы {p['team1']}: {', '.join(names)}")
+        
+    # Проверяем травмы гостей
+    away_inj = injuries.get("away", [])
+    if away_inj:
+        names = [inj.get("name", "") for inj in away_inj[:3]]
+        lines.append(f"🏥 Травмы {p['team2']}: {', '.join(names)}")
+        
+    if lines:
+        return "\n" + "\n".join(lines) + "\n"
+    return ""
+
 def format_signal_multi(p, strategies, odd):
     total = p["s1"] + p["s2"]
     tb1 = total + 0.5
@@ -1246,6 +1271,9 @@ def format_signal_multi(p, strategies, odd):
         if odd is not None
         else "💰 Кэф: недоступен"
     )
+    
+    # Добавляем контекст Ruscore (травмы)
+    ruscore_context = build_ruscore_context(p)
 
     return (
         "🎯 <b>СИГНАЛ OLD — следующий гол до конца матча</b>\n"
@@ -1259,10 +1287,10 @@ def format_signal_multi(p, strategies, odd):
         f"🚩 Углы: {p['corners1']} — {p['corners2']}\n"
         f"{trend_line}{odd_line}\n"
         f"🧠 Фильтры: {', '.join(strategies)}\n"
+        f"{ruscore_context}"
         "💡 Цель: хотя бы один гол до финального свистка; "
         "это оценка, не гарантия."
     )
-
 
 # ============================================================
 # ОТПРАВКА СИГНАЛА
