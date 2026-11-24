@@ -1,4 +1,3 @@
-
 import time
 import json
 import re
@@ -1296,6 +1295,42 @@ def format_signal_multi(p, strategies, odd):
 # ОТПРАВКА СИГНАЛА
 # ============================================================
 
+def get_odd_total(game, total_goals):
+    target = float(total_goals) + 0.5
+    
+    # 1. Ищем в events (формат topGamesByStat)
+    events = game.get("events")
+    if isinstance(events, list):
+        for item in events:
+            if isinstance(item, dict) and item.get("type") == 9: # 9 = ТБ, 10 = ТМ
+                try:
+                    param = float(item.get("parameter", 0))
+                    odd = float(item.get("cf", 0))
+                    if abs(param - target) < 0.001 and odd > 1.0:
+                        return odd
+                except (TypeError, ValueError):
+                    continue
+                    
+    # 2. Ищем в centralBlockEventGroups (формат GetGameZip)
+    for grp in (game.get("centralBlockEventGroups") or []):
+        if not isinstance(grp, dict) or grp.get("groupId") != 17: 
+            continue
+        for event_list in (grp.get("events") or []):
+            if not isinstance(event_list, list): 
+                continue
+            for item in event_list:
+                if not isinstance(item, dict) or item.get("type") != 9: 
+                    continue
+                try:
+                    parameter, odd = float(item.get("parameter")), float(item.get("cf"))
+                except (TypeError, ValueError): 
+                    continue
+                if abs(parameter - target) < 0.001 and odd > 1.0: 
+                    return odd
+                    
+    return None
+
+
 def try_send_signal(
     p, strategy, now_ts, p_game_cache, sent_signals, pending_checks
 ):
@@ -1308,6 +1343,10 @@ def try_send_signal(
     game = p_game_cache.get(gid) or p_game_cache.get(key) or {}
 
     odd = get_odd_total(game, p["s1"] + p["s2"])
+
+    # --- ВРЕМЕННЫЙ ЛОГ ---
+    print(f"🎲 КОЭФ: {p['match']} | найдено={odd}", flush=True)
+    # ----------------------
 
     if odd is None:
         print(
@@ -1322,6 +1361,7 @@ def try_send_signal(
         return False
 
     if odd < max(strategy["min_odd"], 1.7):
+        print(f"⚠️ Кэф {odd} ниже порога для {p['match']}", flush=True) # временный лог
         return False
 
     text = format_signal_multi(
