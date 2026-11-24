@@ -1295,40 +1295,87 @@ def format_signal_multi(p, strategies, odd):
 # ОТПРАВКА СИГНАЛА
 # ============================================================
 
+
 def get_odd_total(game, total_goals):
-    target = float(total_goals) + 0.5
-    
-    # 1. Ищем в events (формат topGamesByStat)
-    events = game.get("events")
+    """
+    Получает коэффициент ТБ следующего тотала.
+    groupId=17 — тоталы.
+    type=9 — ТБ.
+    type=10 — ТМ.
+    """
+
+    try:
+        target = float(total_goals) + 0.5
+    except (TypeError, ValueError):
+        return None
+
+    candidates = []
+
+    # Формат events: groupId находится непосредственно в событии
+    events = game.get("events") or []
+
     if isinstance(events, list):
         for item in events:
-            if isinstance(item, dict) and item.get("type") == 9: # 9 = ТБ, 10 = ТМ
-                try:
-                    param = float(item.get("parameter", 0))
-                    odd = float(item.get("cf", 0))
-                    if abs(param - target) < 0.001 and odd > 1.0:
-                        return odd
-                except (TypeError, ValueError):
-                    continue
-                    
-    # 2. Ищем в centralBlockEventGroups (формат GetGameZip)
-    for grp in (game.get("centralBlockEventGroups") or []):
-        if not isinstance(grp, dict) or grp.get("groupId") != 17: 
-            continue
-        for event_list in (grp.get("events") or []):
-            if not isinstance(event_list, list): 
+            if not isinstance(item, dict):
                 continue
-            for item in event_list:
-                if not isinstance(item, dict) or item.get("type") != 9: 
+
+            try:
+                group_id = int(item.get("groupId", 0))
+                event_type = int(item.get("type", 0))
+                parameter = float(item.get("parameter"))
+                odd = float(item.get("cf"))
+            except (TypeError, ValueError):
+                continue
+
+            if group_id != 17 or event_type != 9:
+                continue
+
+            if abs(parameter - target) < 0.001 and odd > 1.0:
+                candidates.append(odd)
+
+    # Формат centralBlockEventGroups: groupId находится в родительской группе
+    groups = game.get("centralBlockEventGroups") or []
+
+    if isinstance(groups, list):
+        for grp in groups:
+            if not isinstance(grp, dict):
+                continue
+
+            try:
+                group_id = int(grp.get("groupId", 0))
+            except (TypeError, ValueError):
+                continue
+
+            if group_id != 17:
+                continue
+
+            for event_list in (grp.get("events") or []):
+                if not isinstance(event_list, list):
                     continue
-                try:
-                    parameter, odd = float(item.get("parameter")), float(item.get("cf"))
-                except (TypeError, ValueError): 
-                    continue
-                if abs(parameter - target) < 0.001 and odd > 1.0: 
-                    return odd
-                    
-    return None
+
+                for item in event_list:
+                    if not isinstance(item, dict):
+                        continue
+
+                    try:
+                        event_type = int(item.get("type", 0))
+                        parameter = float(item.get("parameter"))
+                        odd = float(item.get("cf"))
+                    except (TypeError, ValueError):
+                        continue
+
+                    if event_type != 9:
+                        continue
+
+                    if abs(parameter - target) < 0.001 and odd > 1.0:
+                        candidates.append(odd)
+
+    if not candidates:
+        return None
+
+    # Если рынок продублирован, берём наибольший найденный коэффициент
+    return max(candidates)
+
 
 
 def try_send_signal(
