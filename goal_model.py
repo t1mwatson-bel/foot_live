@@ -460,13 +460,35 @@ def sync_confirmed_results():
     """
     import os
     import json
-    
-    # Ищем файл результатов в корне проекта
-    results_file = "football_results.jsonl"
-    
-    if not os.path.isfile(results_file):
-        print(f"⚠️ OLD ML: файл {results_file} не найден", flush=True)
+
+    # Ищем архив результатов по явной настройке, в DATA_DIR и рядом с модулем.
+    # Не полагаемся на текущую рабочую директорию процесса (cwd).
+    configured_file = os.getenv("FOOTBALL_RESULTS_FILE")
+    candidates = []
+    if configured_file:
+        candidates.append(Path(configured_file).expanduser())
+
+    candidates.extend([
+        DATA_DIR / "football_results.jsonl",
+        Path(__file__).resolve().parent / "football_results.jsonl",
+        Path.cwd() / "football_results.jsonl",
+    ])
+
+    results_path = next(
+        (candidate.resolve() for candidate in candidates if candidate.is_file()),
+        None,
+    )
+
+    if results_path is None:
+        checked = ", ".join(str(path) for path in candidates)
+        print(
+            f"⚠️ OLD ML: football_results.jsonl не найден. Проверены пути: {checked}",
+            flush=True,
+        )
         return 0
+
+    results_file = str(results_path)
+    print(f"📚 OLD ML: архив результатов найден: {results_file}", flush=True)
 
     target = None
     changed = 0
