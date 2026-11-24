@@ -59,16 +59,31 @@ def get_1x2_odds(game):
 
 def get_odd_total(game, total_goals):
     target = float(total_goals) + 0.5
+
     for grp in (game.get("centralBlockEventGroups") or []):
-        if not isinstance(grp, dict) or grp.get("groupId") != 17: continue
+        if not isinstance(grp, dict) or grp.get("groupId") != 17:
+            continue
+
         for event_list in (grp.get("events") or []):
-            if not isinstance(event_list, list): continue
+            if not isinstance(event_list, list):
+                continue
+
             for item in event_list:
-                if not isinstance(item, dict) or item.get("type") != 9: continue
+                if not isinstance(item, dict):
+                    continue
+
+                if item.get("type") != 9:
+                    continue
+
                 try:
-                    parameter, odd = float(item.get("parameter")), float(item.get("cf"))
-                except: continue
-                if abs(parameter - target) < 0.001 and odd > 1.0: return odd
+                    parameter = float(item.get("parameter"))
+                    odd = float(item.get("cf"))
+                except (TypeError, ValueError):
+                    continue
+
+                if abs(parameter - target) < 0.001 and odd > 1.0:
+                    return odd
+
     return None
 
 def update_match_history(p, now_ts, recent_snapshots):
