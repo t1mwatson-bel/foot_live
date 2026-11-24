@@ -1,0 +1,45 @@
+{"record_type": "signal", "game_id": "766489402", "timestamp": 1793389123, "match": "Гавр — ПСЖ", "league": "🇫🇷 Чемпионат Франции. Лига 1", "strategy": "xG-мощь", "odd": 1.84, "score_at_signal": "1-5"}
+{"record_type": "result", "game_id": "766489402", "timestamp": 1793390026, "match": "Гавр — ПСЖ", "strategy": "xG-мощь", "odd": 1.84, "outcome": "miss", "final_score": "1-5"}
+{"record_type": "signal", "game_id": "766516954", "timestamp": 1793393575, "match": "Эльвeрсберг — Майнц 05", "league": "🇩🇪 Чемпионат Германии. Бундеслига", "strategy": "Углы + атаки", "odd": 1.44, "score_at_signal": "3-0"}
+{"record_type": "result", "game_id": "766516954", "timestamp": 1793395205, "match": "Эльвeрсберг — Майнц 05", "strategy": "Углы + атаки", "odd": 1.44, "outcome": "hit", "final_score": "4-0"}
+{"record_type": "signal", "game_id": "766525329", "timestamp": 1793395326, "match": "Лилль — Ланс", "league": "🇫🇷 Чемпионат Франции. Лига 1", "strategy": "Углы + атаки", "odd": 1.44, "score_at_signal": "0-0"}
+{"record_type": "result", "game_id": "766525329", "timestamp": 1793396954, "match": "Лилль — Ланс", "strategy": "Углы + атаки", "odd": 1.44, "outcome": "hit", "final_score": "1-0"}
+{"record_type": "signal", "game_id": "766764619", "timestamp": 1793459709, "match": "Болонья — Монца", "league": "🇮🇹 Чемпионат Италии. Серия А", "strategy": "Углы + атаки", "odd": 1.408, "score_at_signal": "1-1"}
+{"record_type": "result", "game_id": "766764619", "timestamp": 1793459890, "match": "Болонья — Монца", "strategy": "Углы + атаки", "odd": 1.408, "outcome": "hit", "final_score": "2-1"}
+{"record_type": "signal", "game_id": "766775694", "timestamp": 1793462175, "match": "Динамо Москва — Ахмат", "league": "🇷🇺 Чемпионат России. РПЛ", "strategy": "Удары", "odd": 1.4, "score_at_signal": "1-0"}
+{"record_type": "signal", "game_id": "766775721", "timestamp": 1793462357, "match": "Шальке 04 — РБ Лейпциг", "league": "🇩🇪 Чемпионат Германии. Бундеслига", "strategy": "xG-мощь", "odd": 1.408, "score_at_signal": "0-1"}
+{"record_type": "signal", "game_id": "766775873", "timestamp": 1793462720, "match": "Байер — Штутгарт", "league": "🇩🇪 Чемпионат Германии. Бундеслига", "strategy": "Углы + атаки", "odd": 1.56, "score_at_signal": "1-4"}
+{"record_type": "result", "game_id": "766775873", "timestamp": 1793462900, "match": "Байер — Штутгарт", "strategy": "Углы + атаки", "odd": 1.56, "outcome": "hit", "final_score": "2-4"}
+{"record_type": "signal", "game_id": "766775493", "timestamp": 1793462961, "match": "Вердер — Хоффенхайм", "league": "🇩🇪 Чемпионат Германии. Бундеслига", "strategy": "Углы + атаки", "odd": 1.84, "score_at_signal": "1-0"}
+{"record_type": "result", "game_id": "766775694", "timestamp": 1793463082, "match": "Динамо Москва — Ахмат", "strategy": "Удары", "odd": 1.4, "outcome": "hit", "final_score": "2-0"}
+{"record_type": "result", "game_id": "766775721", "timestamp": 1793463082, "match": "Шальке 04 — РБ Лейпциг", "strategy": "xG-мощь", "odd": 1.408, "outcome": "hit", "final_score": "0-2"}
+{"record_type": "result", "game_id": "766775493", "timestamp": 1793463142, "match": "Вердер — Хоффенхайм", "strategy": "Углы + атаки", "odd": 1.84, "outcome": "hit", "final_score": "2-0"}
+{"record_type": "signal", "game_id": "766783814", "timestamp": 1793464225, "match": "Манчестер Сити — Брайтон энд Хав Альбион", "league": "🏴 Чемпионат Англии. АПЛ", "strategy": "Углы + атаки", "odd": 1.408, "score_at_signal": "0-1"}
+{"record_type": "result", "game_id": "766783814", "timestamp": 1793465671, "match": "Манчестер Сити — Брайтон энд Хав Альбион", "strategy": "Углы + атаки", "odd": 1.408, "outcome": "miss", "final_score": "0-1"}
+{"record_type": "signal", "game_id": "766839864", "timestamp": 1793472889, "match": "Тоттенхэм Хотспур — Кристал Пэлэс", "league": "🏴 Чемпионат Англии. АПЛ", "strategy": "Удары", "odd": 1.408, "score_at_signal": "1-0"}
+{"record_type": "signal", "game_id": "766840345", "timestamp": 1793473251, "match": "Реал Бетис — Малага", "league": "🇪🇸 Чемпионат Испании. Примера", "strategy": "Удары", "odd": 1.408, "score_at_signal": "2-0"}
+{"record_type": "result", "game_id": "766839864", "timestamp": 1793473432, "match": "Тоттенхэм Хотспур — Кристал Пэлэс", "strategy": "Удары", "odd": 1.408, "outcome": "hit", "final_score": "2-0"}
+{"record_type": "result", "game_id": "766840345", "timestamp": 1793473432, "match": "Реал Бетис — Малага", "strategy": "Удары", "odd": 1.408, "outcome": "hit", "final_score": "2-1"}
+{"record_type": "signal", "game_id": "766840478", "timestamp": 1793473793, "match": "Бавария — Боруссия", "league": "🇩🇪 Чемпионат Германии. Бундеслига", "strategy": "Комбо xG+углы", "odd": 1.64, "score_at_signal": "2-1"}
+{"record_type": "result", "game_id": "766840478", "timestamp": 1793474698, "match": "Бавария — Боруссия", "strategy": "Комбо xG+углы", "odd": 1.64, "outcome": "hit", "final_score": "2-2"}
+{"record_type": "signal", "game_id": "766884115", "timestamp": 1793481494, "match": "Милан — Интер", "league": "🇮🇹 Чемпионат Италии. Серия А", "strategy": "Удары", "odd": 1.592, "score_at_signal": "3-1"}
+{"record_type": "signal", "game_id": "766888699", "timestamp": 1793482821, "match": "Барселона — Алавес", "league": "🇪🇸 Чемпионат Испании. Примера", "strategy": "xG-мощь", "odd": 1.48, "score_at_signal": "5-0"}
+{"record_type": "result", "game_id": "766884115", "timestamp": 1793483123, "match": "Милан — Интер", "strategy": "Удары", "odd": 1.592, "outcome": "miss", "final_score": "3-1"}
+{"record_type": "result", "game_id": "766888699", "timestamp": 1793483184, "match": "Барселона — Алавес", "strategy": "xG-мощь", "odd": 1.48, "outcome": "hit", "final_score": "6-0"}
+{"record_type": "signal", "game_id": "767074199", "timestamp": 1793537698, "match": "Комо — Венеция", "league": "🇮🇹 Чемпионат Италии. Серия А", "strategy": "xG-мощь", "odd": 1.408, "score_at_signal": "1-0"}
+{"record_type": "result", "game_id": "767074199", "timestamp": 1793539687, "match": "Комо — Венеция", "strategy": "xG-мощь", "odd": 1.408, "outcome": "miss", "final_score": "1-0"}
+{"record_type": "signal", "game_id": "767140080", "timestamp": 1793551838, "match": "Расинг Сантандер — Реал Мадрид", "league": "🇪🇸 Чемпионат Испании. Примера", "strategy": "xG-мощь", "odd": 1.408, "score_at_signal": "0-3"}
+{"record_type": "result", "game_id": "767140080", "timestamp": 1793553467, "match": "Расинг Сантандер — Реал Мадрид", "strategy": "xG-мощь", "odd": 1.408, "outcome": "miss", "final_score": "0-3"}
+{"record_type": "signal", "game_id": "767158577", "timestamp": 1793554610, "match": "Париж — АС Монако", "league": "🇫🇷 Чемпионат Франции. Лига 1", "strategy": "xG-мощь", "odd": 1.408, "score_at_signal": "2-0"}
+{"record_type": "result", "game_id": "767158577", "timestamp": 1793554790, "match": "Париж — АС Монако", "strategy": "xG-мощь", "odd": 1.408, "outcome": "hit", "final_score": "2-1"}
+{"record_type": "signal", "game_id": "767158155", "timestamp": 1793555151, "match": "Лион — Анже", "league": "🇫🇷 Чемпионат Франции. Лига 1", "strategy": "Опасные атаки", "odd": 1.7, "score_at_signal": "1-0"}
+{"record_type": "result", "game_id": "767158155", "timestamp": 1793556055, "match": "Лион — Анже", "strategy": "Опасные атаки", "odd": 1.7, "outcome": "hit", "final_score": "2-0"}
+{"record_type": "signal", "game_id": "767165425", "timestamp": 1793556597, "match": "Айнтрахт Франкфурт — Гамбург", "league": "🇩🇪 Чемпионат Германии. Бундеслига", "strategy": "Комбо xG+углы", "odd": 1.84, "score_at_signal": "3-1"}
+{"record_type": "signal", "game_id": "767173850", "timestamp": 1793557621, "match": "Лечче — Дженоа", "league": "🇮🇹 Чемпионат Италии. Серия А", "strategy": "Углы + атаки", "odd": 1.52, "score_at_signal": "1-2"}
+{"record_type": "result", "game_id": "767165425", "timestamp": 1793557863, "match": "Айнтрахт Франкфурт — Гамбург", "strategy": "Комбо xG+углы", "odd": 1.84, "outcome": "miss", "final_score": "3-1"}
+{"record_type": "result", "game_id": "767173850", "timestamp": 1793559430, "match": "Лечче — Дженоа", "strategy": "Углы + атаки", "odd": 1.52, "outcome": "miss", "final_score": "1-2"}
+{"record_type": "signal", "game_id": "767185225", "timestamp": 1793560152, "match": "Эльче — Валенсия", "league": "🇪🇸 Чемпионат Испании. Примера", "strategy": "Углы + атаки", "odd": 2.064, "score_at_signal": "0-1"}
+{"record_type": "result", "game_id": "767185225", "timestamp": 1793561236, "match": "Эльче — Валенсия", "strategy": "Углы + атаки", "odd": 2.064, "outcome": "miss", "final_score": "0-1"}
+{"record_type": "signal", "game_id": "767218831", "timestamp": 1793568273, "match": "Ювентус — Наполи", "league": "🇮🇹 Чемпионат Италии. Серия А", "strategy": "Углы + атаки", "odd": 2.16, "score_at_signal": "1-0"}
+{"record_type": "result", "game_id": "767218831", "timestamp": 1793568815, "match": "Ювентус — Наполи", "strategy": "Углы + атаки", "odd": 2.16, "outcome": "hit", "final_score": "2-0"}
+{"record_type": "signal", "game_id": "767485849:individual_home", "timestamp": 1793650731, "match": "Лорьян — Стад Брестуа 29", "league": "🇫🇷 Чемпионат Франции. Лига 1", "strategy": "ИТБ 0.5 — Хозяева", "odd": 4.61, "score_at_signal": "0-0"}
