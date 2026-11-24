@@ -1389,15 +1389,16 @@ def try_send_signal(
 
     game = p_game_cache.get(gid) or p_game_cache.get(key) or {}
 
-    odd = get_odd_total(game, p["s1"] + p["s2"])
-
-    # --- ВРЕМЕННЫЙ ЛОГ ---
-    print(f"🎲 КОЭФ: {p['match']} | найдено={odd}", flush=True)
-    # ----------------------
+    total_goals = p["s1"] + p["s2"]
+    target_line = total_goals + 0.5
+    odd = get_odd_total(game, total_goals)
+    match_name = p.get("match", "неизвестный матч")
 
     if odd is None:
         print(
-            f"⚠️ Нет коэффициента для {p['match']}; сигнал не отправлен",
+            f"⚠️ КОЭФФИЦИЕНТ НЕ НАЙДЕН | {match_name} | "
+            f"счёт {p.get('score', '?')} | "
+            f"нужен рынок ТБ {target_line:g}; сигнал не отправлен",
             flush=True,
         )
         return False
@@ -1405,11 +1406,34 @@ def try_send_signal(
     try:
         odd = float(odd)
     except (TypeError, ValueError):
+        print(
+            f"❌ НЕКОРРЕКТНЫЙ КОЭФФИЦИЕНТ | {match_name} | значение={odd!r}",
+            flush=True,
+        )
         return False
 
-    if odd < max(strategy["min_odd"], 1.7):
-        print(f"⚠️ Кэф {odd} ниже порога для {p['match']}", flush=True) # временный лог
+    min_odd = max(float(strategy["min_odd"]), 1.7)
+
+    print(
+        f"✅ КОЭФФИЦИЕНТ НАЙДЕН | {match_name} | "
+        f"ТБ {target_line:g} | кэф {odd:.2f}",
+        flush=True,
+    )
+
+    if odd < min_odd:
+        print(
+            f"⛔ КОЭФФИЦИЕНТ НИЖЕ ПОРОГА | "
+            f"{odd:.2f} < {min_odd:.2f} | "
+            f"{match_name} | {strategy['strategy']}",
+            flush=True,
+        )
         return False
+
+    print(
+        f"✅ ПОРОГ ПРОЙДЕН | {odd:.2f} >= {min_odd:.2f} | "
+        f"{match_name} | {strategy['strategy']}",
+        flush=True,
+    )
 
     text = format_signal_multi(
         p,
