@@ -9,8 +9,8 @@ if not BOT_TOKEN or not CHAT_ID:
     print("❌ BOT_TOKEN или CHAT_ID не заданы", flush=True)
     sys.exit(1)
 
-print(f"✅ BOT_TOKEN: {BOT_TOKEN[:5]}...", flush=True)
-print(f"✅ CHAT_ID: {CHAT_ID}", flush=True)
+print("✅ BOT_TOKEN: задан", flush=True)
+print("✅ CHAT_ID: задан", flush=True)
 
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 BASE_URL = "https://1xlite-32085.pro"
