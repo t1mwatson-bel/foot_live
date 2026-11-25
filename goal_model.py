@@ -54,7 +54,7 @@ def find_bot_db():
 
 BOT_DB = find_bot_db()
 
-MIN_TRAINING_SAMPLES = 30
+MIN_TRAINING_SAMPLES = 50
 LEARNING_RATE = 0.05
 L2 = 0.0005
 EPOCHS = 3
@@ -631,40 +631,73 @@ def save_state(con, weights, bias, sample_count):
 # ОБУЧЕНИЕ — ЛОГИСТИЧЕСКАЯ РЕГРЕССИЯ НА SGD
 # ============================================================
 
-def train():
-    con = None
+def _fit_weights(samples):
+    weights = [0.0] * len(FEATURE_NAMES)
+    bias = 0.0
 
+    for _ in range(EPOCHS):
+        for vector, target in samples:
+            prediction = sigmoid(
+                sum(w * x for w, x in zip(weights, vector)) + bias
+            )
+            error = prediction - target
+            for i, value in enumerate(vector):
+                gradient = error * value + L2 * weights[i]
+                weights[i] -= LEARNING_RATE * gradient
+            bias -= LEARNING_RATE * error
+
+    return weights, bias
+
+
+def _evaluate_weights(samples, weights, bias):
+    if not samples:
+        return None
+
+    loss = 0.0
+    correct = 0
+    for vector, target in samples:
+        probability = sigmoid(
+            sum(w * x for w, x in zip(weights, vector)) + bias
+        )
+        probability = max(0.000001, min(0.999999, probability))
+        loss -= target * math.log(probability) + (1 - target) * math.log(1 - probability)
+        predicted = 1 if probability >= 0.5 else 0
+        correct += int(predicted == target)
+
+    return {
+        "logloss": loss / len(samples),
+        "accuracy": correct / len(samples),
+        "count": len(samples),
+    }
+
+
+def train():
+    """
+    Обучает теневую модель с проверкой на новых, ранее не использованных исходах.
+    Новая модель сохраняется только если улучшает log-loss и не ухудшает accuracy.
+    """
+    con = None
     try:
         con = connect_model_db()
-
         rows = con.execute("""
-            SELECT features_json, outcome
+            SELECT features_json, outcome, labeled_ts
             FROM ml_samples
             WHERE outcome IN (0, 1)
             ORDER BY labeled_ts ASC, created_ts ASC
         """).fetchall()
 
         samples = []
-
         for row in rows:
             try:
                 feature_dict = json.loads(row["features_json"])
-                vector = [
-                    number(feature_dict.get(name, 0))
-                    for name in FEATURE_NAMES
-                ]
+                vector = [number(feature_dict.get(name, 0)) for name in FEATURE_NAMES]
                 outcome = int(row["outcome"])
-
-                if outcome not in (0, 1):
-                    continue
-
-                samples.append((vector, outcome))
-
+                if outcome in (0, 1):
+                    samples.append((vector, outcome, int(row["labeled_ts"] or 0)))
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
 
         sample_count = len(samples)
-
         if sample_count < MIN_TRAINING_SAMPLES:
             return {
                 "trained": False,
@@ -672,32 +705,78 @@ def train():
                 "reason": "мало подтверждённых примеров",
             }
 
-        _, _, previous_samples = load_state(con)
-        # Каждый запуск заново обучает модель на полной размеченной выборке,
-        # чтобы повторные синхронизации не переобучали её на старых примерах.
-        weights = [0.0] * len(FEATURE_NAMES)
-        bias = 0.0
+        state_row = con.execute(
+            "SELECT updated_ts FROM ml_state WHERE id = 1"
+        ).fetchone()
+        old_weights, old_bias, previous_samples = load_state(con)
+        previous_updated_ts = int(state_row["updated_ts"] or 0) if state_row else 0
 
-        # Несколько проходов по сохранённым подтверждённым исходам.
-        for _ in range(EPOCHS):
-            for vector, target in samples:
-                prediction = sigmoid(
-                    sum(w * x for w, x in zip(weights, vector)) + bias
-                )
-                error = prediction - target
+        if previous_samples > 0 and previous_updated_ts > 0:
+            # Для проверки берём только исходы, появившиеся после предыдущего обучения.
+            training_rows = [item for item in samples if item[2] <= previous_updated_ts]
+            validation_rows = [item for item in samples if item[2] > previous_updated_ts]
+        else:
+            # Первое обучение: хронологическое разделение 80/20.
+            validation_count = max(10, int(math.ceil(sample_count * 0.2)))
+            training_rows = samples[:-validation_count]
+            validation_rows = samples[-validation_count:]
 
-                for i, value in enumerate(vector):
-                    gradient = error * value + L2 * weights[i]
-                    weights[i] -= LEARNING_RATE * gradient
+        if len(training_rows) < 30 or len(validation_rows) < 10:
+            return {
+                "trained": False,
+                "samples": sample_count,
+                "reason": (
+                    f"недостаточно новых данных для честной проверки "
+                    f"(обучение {len(training_rows)}, проверка {len(validation_rows)}; "
+                    f"нужно минимум 30 и 10)"
+                ),
+            }
 
-                bias -= LEARNING_RATE * error
+        train_data = [(vector, target) for vector, target, _ in training_rows]
+        validation_data = [(vector, target) for vector, target, _ in validation_rows]
 
-        save_state(con, weights, bias, sample_count)
+        candidate_weights, candidate_bias = _fit_weights(train_data)
+        candidate_metrics = _evaluate_weights(
+            validation_data, candidate_weights, candidate_bias
+        )
+
+        if previous_samples > 0:
+            previous_metrics = _evaluate_weights(
+                validation_data, old_weights, old_bias
+            )
+        else:
+            # До первой обученной модели сравниваем с нейтральной вероятностью 50%.
+            previous_metrics = _evaluate_weights(
+                validation_data, [0.0] * len(FEATURE_NAMES), 0.0
+            )
+
+        if (
+            candidate_metrics["logloss"] >= previous_metrics["logloss"] - 0.005
+            or candidate_metrics["accuracy"] < previous_metrics["accuracy"]
+        ):
+            return {
+                "trained": False,
+                "samples": sample_count,
+                "reason": (
+                    "новая модель не улучшила контрольную выборку: "
+                    f"log-loss {candidate_metrics['logloss']:.4f} против "
+                    f"{previous_metrics['logloss']:.4f}; "
+                    f"accuracy {candidate_metrics['accuracy']:.1%} против "
+                    f"{previous_metrics['accuracy']:.1%}"
+                ),
+            }
+
+        # Проверка пройдена — финальная модель обучается на всей размеченной истории.
+        all_data = [(vector, target) for vector, target, _ in samples]
+        final_weights, final_bias = _fit_weights(all_data)
+        save_state(con, final_weights, final_bias, sample_count)
 
         return {
             "trained": True,
             "samples": sample_count,
             "previous_samples": previous_samples,
+            "validation": candidate_metrics,
+            "previous_validation": previous_metrics,
         }
 
     except Exception as e:
@@ -707,7 +786,6 @@ def train():
             "samples": 0,
             "reason": str(e),
         }
-
     finally:
         if con:
             con.close()
