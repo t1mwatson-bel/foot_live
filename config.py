@@ -59,7 +59,20 @@ RUSCORE_LEAGUES_FILTER = ["премьер-лига", "бундеслига", "л
 CHECK_FIRST_AFTER = 180
 CHECK_REPEAT_AFTER = 180
 CHECK_MAX_ATTEMPTS = 40
-RESULTS_FILE = os.getenv("FOOTBALL_RESULTS_FILE", "football_results.jsonl")
+# Единый абсолютный путь для чтения и записи истории результатов.
+# По умолчанию архив находится в DATA_DIR (обычно /app).
+from pathlib import Path
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app")).expanduser()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+_results_path = Path(os.getenv("FOOTBALL_RESULTS_FILE", str(DATA_DIR / "football_results.jsonl"))).expanduser()
+if not _results_path.is_absolute():
+    _results_path = DATA_DIR / _results_path
+_results_path.parent.mkdir(parents=True, exist_ok=True)
+RESULTS_FILE = str(_results_path.resolve())
+
+print(f"📚 Архив результатов: {RESULTS_FILE}", flush=True)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36",
