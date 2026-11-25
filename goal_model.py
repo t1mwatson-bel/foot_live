@@ -537,20 +537,8 @@ def sync_confirmed_results():
             flush=True,
         )
 
-        if changed:
-            result = train()
-            if result.get("trained"):
-                print(
-                    f"🧠 OLD ML: модель обучена на {result['samples']} подтверждённых сигналах",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"🧠 OLD ML: обучение пока не выполнено — "
-                    f"{result.get('reason', 'недостаточно данных')} "
-                    f"({result.get('samples', 0)}/{MIN_TRAINING_SAMPLES})",
-                    flush=True,
-                )
+        # Обучение запускается отдельно по расписанию из main.py,
+        # а не после каждого нового результата.
         return changed
 
     except Exception as e:
