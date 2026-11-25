@@ -47,6 +47,62 @@ schedule_updated_at = None
 ruscore_events_cache = []
 ruscore_cache_updated_at = None
 
+# OLD ML: синхронизация результатов каждые 5 минут,
+# обучение — не чаще одного раза за московские сутки.
+ML_SYNC_INTERVAL = 300
+last_ml_sync_ts = 0
+last_ml_train_date = None
+
+
+def run_ml_maintenance(now):
+    global last_ml_sync_ts, last_ml_train_date
+
+    now_ts = time.time()
+    if now_ts - last_ml_sync_ts >= ML_SYNC_INTERVAL:
+        try:
+            changed = ml.sync_confirmed_results()
+            print(
+                f"🧠 OLD ML: синхронизация завершена | новых меток {changed}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"⚠️ OLD ML: ошибка периодической синхронизации: {e}", flush=True)
+        finally:
+            last_ml_sync_ts = now_ts
+
+    # Запускаем обучение один раз в сутки после 03:00 по Москве.
+    today = now.date().isoformat()
+    if now.hour >= 3 and last_ml_train_date != today:
+        try:
+            state = ml.status()
+            labeled = int(state.get("labeled", 0))
+            minimum = int(getattr(ml, "MIN_TRAINING_SAMPLES", 30))
+
+            if labeled < minimum:
+                print(
+                    f"🧠 OLD ML: ежедневное обучение пока не запускается | "
+                    f"размечено {labeled}/{minimum}",
+                    flush=True,
+                )
+            else:
+                result = ml.train()
+                if result.get("trained"):
+                    print(
+                        f"🧠 OLD ML: ежедневное обучение завершено | "
+                        f"примеров {result.get('samples', 0)}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"⚠️ OLD ML: ежедневное обучение не выполнено | "
+                        f"{result.get('reason', 'неизвестная причина')}",
+                        flush=True,
+                    )
+        except Exception as e:
+            print(f"⚠️ OLD ML: ошибка ежедневного обучения: {e}", flush=True)
+        finally:
+            last_ml_train_date = today
+
 def get_live_games():
     try:
         # Возвращаем правильный эндпоинт со статистикой
@@ -245,15 +301,11 @@ def check_results_safely():
 def bot_loop():
     print("🚀 LIVE-БОТ OLD ЗАПУЩЕН", flush=True)
     
-    try:
-        ml.sync_confirmed_results()
-    except Exception as e:
-        print(f"⚠️ Ошибка при старте синхронизации OLD ML: {e}", flush=True)
-
     while True:
         try:
             now = datetime.now(MOSCOW_TZ)
             now_str = now.strftime("%H:%M")
+            run_ml_maintenance(now)
 
             check_results_safely()
             retry_telegram_results()
