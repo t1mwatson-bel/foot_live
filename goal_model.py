@@ -455,64 +455,88 @@ def observe(match, strategy, odds=None):
 
 def sync_confirmed_results():
     """
-    Читает результаты из football_results.jsonl и обновляет базу модели.
-    Возвращает количество новых размеченных примеров.
+    Сверяет единый архив результатов с уже сохранёнными ML-признаками.
+    Старые результаты без сохранённых признаков не превращаются в искусственные
+    обучающие примеры: они учитываются в диагностике, но не подменяют features.
     """
-    import os
-    import json
-    
-    # Ищем файл результатов в корне проекта
-    results_file = "football_results.jsonl"
-    
-    if not os.path.isfile(results_file):
-        print(f"⚠️ OLD ML: файл {results_file} не найден", flush=True)
+    from config import RESULTS_FILE
+
+    results_path = Path(RESULTS_FILE)
+    if not results_path.is_file():
+        print(f"⚠️ OLD ML: архив результатов не найден: {results_path}", flush=True)
         return 0
 
-    target = None
-    changed = 0
+    print(f"📚 OLD ML: читаю архив: {results_path}", flush=True)
+    archived_signals = set()
     processed_results = {}
+    malformed_lines = 0
 
     try:
-        # 1. Читаем JSONL и собираем результаты
-        with open(results_file, "r", encoding="utf-8") as f:
-            for line in f:
+        with results_path.open("r", encoding="utf-8") as file:
+            for line in file:
                 if not line.strip():
                     continue
                 try:
                     data = json.loads(line)
-                    if data.get("record_type") == "result":
-                        gid = str(data.get("game_id", "")).strip()
-                        outcome_str = str(data.get("outcome", "")).strip().lower()
-                        
-                        if gid and outcome_str in ("hit", "miss"):
-                            # Если результат уже был, берем последний
-                            processed_results[gid] = 1 if outcome_str == "hit" else 0
                 except json.JSONDecodeError:
+                    malformed_lines += 1
+                    continue
+                if not isinstance(data, dict):
                     continue
 
+                gid = str(data.get("game_id", "")).strip()
+                if not gid:
+                    continue
+                if data.get("record_type") == "signal":
+                    archived_signals.add(gid)
+                elif data.get("record_type") == "result":
+                    outcome_str = str(data.get("outcome", "")).strip().lower()
+                    if outcome_str in ("hit", "miss"):
+                        processed_results[gid] = 1 if outcome_str == "hit" else 0
+
         if not processed_results:
+            print(
+                f"📊 OLD ML: архив прочитан | сигналов {len(archived_signals)} | "
+                f"подтверждённых результатов 0 | битых строк {malformed_lines}",
+                flush=True,
+            )
             return 0
 
-        # 2. Подключаемся к базе модели
         target = connect_model_db()
+        changed = 0
+        already_labeled = 0
+        unmatched = 0
+        try:
+            for gid, outcome in processed_results.items():
+                row = target.execute(
+                    "SELECT outcome FROM ml_samples WHERE game_id = ?", (gid,)
+                ).fetchone()
+                if row is None:
+                    unmatched += 1
+                    continue
+                if row["outcome"] is not None:
+                    already_labeled += 1
+                    continue
+                cursor = target.execute(
+                    """UPDATE ml_samples SET outcome = ?, labeled_ts = ?
+                       WHERE game_id = ? AND outcome IS NULL""",
+                    (outcome, int(time.time()), gid),
+                )
+                changed += max(cursor.rowcount, 0)
+            target.commit()
+        finally:
+            target.close()
 
-        # 3. Обновляем исходы в ml_samples
-        for gid, outcome in processed_results.items():
-            cursor = target.execute("""
-                UPDATE ml_samples
-                SET outcome = ?, labeled_ts = ?
-                WHERE game_id = ? AND outcome IS NULL
-            """, (
-                outcome,
-                int(time.time()),
-                gid,
-            ))
-            
-            changed += max(cursor.rowcount, 0)
+        hits = sum(1 for value in processed_results.values() if value == 1)
+        misses = len(processed_results) - hits
+        print(
+            f"📊 OLD ML: архив | сигналов {len(archived_signals)} | "
+            f"результатов {len(processed_results)} | зашло {hits} / не зашло {misses} | "
+            f"новых меток ML {changed} | уже размечено {already_labeled} | "
+            f"нет признаков в ML-БД {unmatched} | битых строк {malformed_lines}",
+            flush=True,
+        )
 
-        target.commit()
-
-        # 4. Если что-то обновили — запускаем обучение
         if changed:
             result = train()
             if result.get("trained"):
@@ -522,23 +546,16 @@ def sync_confirmed_results():
                 )
             else:
                 print(
-                    f"🧠 OLD ML: обучение пока не выполнено — {result.get('reason', 'недостаточно данных')} "
+                    f"🧠 OLD ML: обучение пока не выполнено — "
+                    f"{result.get('reason', 'недостаточно данных')} "
                     f"({result.get('samples', 0)}/{MIN_TRAINING_SAMPLES})",
                     flush=True,
                 )
-
         return changed
 
     except Exception as e:
-        print(
-            f"⚠️ OLD ML: ошибка синхронизации результатов из JSONL: {e}",
-            flush=True,
-        )
+        print(f"⚠️ OLD ML: ошибка синхронизации результатов из JSONL: {e}", flush=True)
         return 0
-
-    finally:
-        if target:
-            target.close()
 
 
 # ============================================================
