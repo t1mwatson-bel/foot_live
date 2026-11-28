@@ -105,52 +105,139 @@ def update_match_history(p, now_ts, recent_snapshots):
         p["trend"] = {"available": True, "xg_delta": round((p["xg1"] + p["xg2"]) - (reference["xg1"] + reference["xg2"]), 3), "shots_on_delta": (p["shots_on1"] + p["shots_on2"]) - (reference["shots_on1"] + reference["shots_on2"]), "shots_delta": (p["shots_all1"] + p["shots_all2"]) - (reference["shots_all1"] + reference["shots_all2"]), "corners_delta": (p["corners1"] + p["corners2"]) - (reference["corners1"] + reference["corners2"]), "attacks_delta": (p["att1"] + p["att2"]) - (reference["att1"] + reference["att2"])}
 
 def has_real_threat(p):
-    t_xg, t_sot, t_shots = p["xg1"] + p["xg2"], p["shots_on1"] + p["shots_on2"], p["shots_all1"] + p["shots_all2"]
+    """Проверяет, есть ли заметная угроза хотя бы у одной команды."""
+    total_xg = p["xg1"] + p["xg2"]
+    total_sot = p["shots_on1"] + p["shots_on2"]
+    total_shots = p["shots_all1"] + p["shots_all2"]
     trend = p.get("trend", {})
-    recent_pressure = trend.get("available") and (trend.get("xg_delta", 0) >= 0.15 or trend.get("shots_on_delta", 0) >= 1 or trend.get("shots_delta", 0) >= 3)
-    return t_xg >= 0.70 or t_sot >= 3 or t_shots >= 8 or recent_pressure
+    recent_pressure = bool(
+        trend.get("available")
+        and (
+            trend.get("xg_delta", 0) >= 0.15
+            or trend.get("shots_on_delta", 0) >= 1
+            or trend.get("shots_delta", 0) >= 3
+        )
+    )
+    return total_xg >= 0.70 or total_sot >= 3 or total_shots >= 8 or recent_pressure
 
-def common_ok(p, gid, now_ts, last_scores):
-    if p["minute"] > MAX_MINUTE: return False
-    prev = last_scores.get(gid)
-    if prev is None: last_scores[gid] = {"score": p["score"], "changed_at": 0}
-    elif prev.get("score") != p["score"]:
-        last_scores[gid] = {"score": p["score"], "changed_at": now_ts}; return False
-    changed_at = last_scores.get(gid, {}).get("changed_at", 0)
-    if changed_at and now_ts - changed_at < GOAL_COOLDOWN_SEC: return False
+
+def _dominant_side(value1, value2):
+    """Возвращает сторону с большим значением; равенство не считается перевесом."""
+    if value1 > value2:
+        return "home"
+    if value2 > value1:
+        return "away"
+    return None
+
+
+def _side_has_real_threat(p, side):
+    """Не позволяет выбрать команду только по объёмной, но беззубой статистике."""
+    if side == "home":
+        xg, shots_on, shots_all = p["xg1"], p["shots_on1"], p["shots_all1"]
+    elif side == "away":
+        xg, shots_on, shots_all = p["xg2"], p["shots_on2"], p["shots_all2"]
+    else:
+        return False
+
+    return xg >= 0.35 or shots_on >= 1 or shots_all >= 3
+
+
+def _side_is_dismissed(p, side):
+    if side == "home":
+        return p["red1"] > 0
+    if side == "away":
+        return p["red2"] > 0
     return True
 
+
+def _signal_for_side(p, side, strategy, emoji, key, min_odd):
+    """Единая финальная проверка выбранной команды перед созданием сигнала."""
+    if side is None or _side_is_dismissed(p, side):
+        return None
+    if not _side_has_real_threat(p, side):
+        return None
+
+    dominant = p["team1"] if side == "home" else p["team2"]
+    return {
+        "strategy": strategy,
+        "emoji": emoji,
+        "dominant": dominant,
+        "key": key,
+        "min_odd": min_odd,
+    }
+
+
 def strategy_xg(p):
-    diff, on_diff = abs(p["xg1"] - p["xg2"]), abs(p["shots_on1"] - p["shots_on2"])
-    if diff < S1_XG_DIFF or on_diff < S1_SHOTS_ON_DIFF: return None
-    side = "home" if p["xg1"] > p["xg2"] else "away"
-    if (p["red1"] if side == "home" else p["red2"]) > 0: return None
-    return {"strategy": "xG-мощь", "emoji": "🟢", "dominant": p["team1"] if side == "home" else p["team2"], "key": f"xG {diff:.2f}, створ {on_diff}", "min_odd": S1_MIN_ODD}
+    # Преимущество по xG и ударам в створ должно быть у одной команды.
+    side = _dominant_side(p["xg1"], p["xg2"])
+    sot_side = _dominant_side(p["shots_on1"], p["shots_on2"])
+    diff = abs(p["xg1"] - p["xg2"])
+    on_diff = abs(p["shots_on1"] - p["shots_on2"])
+
+    if diff < S1_XG_DIFF or on_diff < S1_SHOTS_ON_DIFF or side != sot_side:
+        return None
+
+    return _signal_for_side(
+        p, side, "xG-мощь", "🟢",
+        f"xG {diff:.2f}, створ {on_diff}", S1_MIN_ODD
+    )
+
 
 def strategy_shots(p):
-    diff, on_diff = abs(p["shots_all1"] - p["shots_all2"]), abs(p["shots_on1"] - p["shots_on2"])
-    if diff < S2_SHOTS_DIFF or on_diff < S2_SHOTS_ON_DIFF: return None
-    side = "home" if p["shots_all1"] > p["shots_all2"] else "away"
-    if (p["red1"] if side == "home" else p["red2"]) > 0: return None
-    return {"strategy": "Удары", "emoji": "🥅", "dominant": p["team1"] if side == "home" else p["team2"], "key": f"удары {diff}, створ {on_diff}", "min_odd": S2_MIN_ODD}
+    # Общие удары и удары в створ должны подтверждать одну и ту же сторону.
+    side = _dominant_side(p["shots_all1"], p["shots_all2"])
+    sot_side = _dominant_side(p["shots_on1"], p["shots_on2"])
+    diff = abs(p["shots_all1"] - p["shots_all2"])
+    on_diff = abs(p["shots_on1"] - p["shots_on2"])
+
+    if diff < S2_SHOTS_DIFF or on_diff < S2_SHOTS_ON_DIFF or side != sot_side:
+        return None
+
+    return _signal_for_side(
+        p, side, "Удары", "🥅",
+        f"удары {diff}, створ {on_diff}", S2_MIN_ODD
+    )
+
 
 def strategy_corners(p):
-    c_diff, a_diff = abs(p["corners1"] - p["corners2"]), abs(p["att1"] - p["att2"])
-    if c_diff < S3_CORNERS_DIFF or a_diff < S3_ATT_DIFF or not has_real_threat(p): return None
-    side = "home" if p["corners1"] > p["corners2"] else "away"
-    if (p["red1"] if side == "home" else p["red2"]) > 0: return None
-    return {"strategy": "Углы + атаки", "emoji": "🚩", "dominant": p["team1"] if side == "home" else p["team2"], "key": f"углы {c_diff}, атаки {a_diff}", "min_odd": S3_MIN_ODD}
+    # Угловые, опасные атаки и реальная угроза должны указывать на одну команду.
+    side = _dominant_side(p["corners1"], p["corners2"])
+    attacks_side = _dominant_side(p["att1"], p["att2"])
+    c_diff = abs(p["corners1"] - p["corners2"])
+    a_diff = abs(p["att1"] - p["att2"])
+
+    if c_diff < S3_CORNERS_DIFF or a_diff < S3_ATT_DIFF or side != attacks_side:
+        return None
+
+    return _signal_for_side(
+        p, side, "Углы + атаки", "🚩",
+        f"углы {c_diff}, атаки {a_diff}", S3_MIN_ODD
+    )
+
 
 def strategy_attacks(p):
     a_diff = abs(p["att1"] - p["att2"])
-    if a_diff < S5_ATT_DIFF or not has_real_threat(p): return None
-    side = "home" if p["att1"] > p["att2"] else "away"
-    if (p["red1"] if side == "home" else p["red2"]) > 0: return None
-    return {"strategy": "Опасные атаки", "emoji": "⚔️", "dominant": p["team1"] if side == "home" else p["team2"], "key": f"атаки {a_diff}", "min_odd": S5_MIN_ODD}
+    if a_diff < S5_ATT_DIFF:
+        return None
+
+    side = _dominant_side(p["att1"], p["att2"])
+    return _signal_for_side(
+        p, side, "Опасные атаки", "⚔️",
+        f"атаки {a_diff}", S5_MIN_ODD
+    )
+
 
 def strategy_combo(p):
-    xg_diff, c_diff = abs(p["xg1"] - p["xg2"]), abs(p["corners1"] - p["corners2"])
-    if xg_diff < S6_XG_DIFF or c_diff < S6_CORNERS_DIFF: return None
-    side = "home" if p["xg1"] > p["xg2"] else "away"
-    if (p["red1"] if side == "home" else p["red2"]) > 0: return None
-    return {"strategy": "Комбо xG+углы", "emoji": "💡", "dominant": p["team1"] if side == "home" else p["team2"], "key": f"xG {xg_diff:.2f}, углы {c_diff}", "min_odd": S6_MIN_ODD}
+    # xG и угловые не должны противоречить друг другу по выбранной стороне.
+    side = _dominant_side(p["xg1"], p["xg2"])
+    corners_side = _dominant_side(p["corners1"], p["corners2"])
+    xg_diff = abs(p["xg1"] - p["xg2"])
+    c_diff = abs(p["corners1"] - p["corners2"])
+
+    if xg_diff < S6_XG_DIFF or c_diff < S6_CORNERS_DIFF or side != corners_side:
+        return None
+
+    return _signal_for_side(
+        p, side, "Комбо xG+углы", "💡",
+        f"xG {xg_diff:.2f}, углы {c_diff}", S6_MIN_ODD
+    )
