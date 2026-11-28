@@ -167,6 +167,25 @@ def _signal_for_side(p, side, strategy, emoji, key, min_odd):
     }
 
 
+def common_ok(p, gid, now_ts, last_scores):
+    """Общие ограничения матча: минута, смена счёта и пауза после гола."""
+    if p["minute"] > MAX_MINUTE:
+        return False
+
+    prev = last_scores.get(gid)
+    if prev is None:
+        last_scores[gid] = {"score": p["score"], "changed_at": 0}
+    elif prev.get("score") != p["score"]:
+        last_scores[gid] = {"score": p["score"], "changed_at": now_ts}
+        return False
+
+    changed_at = last_scores.get(gid, {}).get("changed_at", 0)
+    if changed_at and now_ts - changed_at < GOAL_COOLDOWN_SEC:
+        return False
+
+    return True
+
+
 def strategy_xg(p):
     # Преимущество по xG и ударам в створ должно быть у одной команды.
     side = _dominant_side(p["xg1"], p["xg2"])
